@@ -1,0 +1,39 @@
+/*
+
+Each public method is independent and you can use directly.
+
+Use to get original data by optical flow:
+getOpticalFlow();
+getOpticalFlowX();
+getOpticalFlowY();
+
+Use to get the color image to show the optical flow data:
+showOpticalFlow();
+
+*/
+
+#include <opencv2/opencv.hpp>
+
+using namespace std;
+using namespace cv;
+
+class OpticalFlow
+{
+public:
+	OpticalFlow();
+	~OpticalFlow();
+
+	Mat getOpticalFlow(Mat img, Mat img_pre);
+	Mat getOpticalFlowX(Mat img, Mat img_pre);
+	Mat getOpticalFlowY(Mat img, Mat img_pre);
+
+	Mat showOpticalFlow(Mat img, Mat img_pre);
+
+private:
+
+	Mat calcOpticalFlow(Mat img, Mat img_pre);
+
+	void makecolorwheel(vector<Scalar> &colorwheel);
+	void motionToColor(Mat flow, Mat &color);
+
+};

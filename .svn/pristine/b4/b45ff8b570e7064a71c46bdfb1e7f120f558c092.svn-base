@@ -1,0 +1,65 @@
+/************************************************************************/
+/* 
+Parameters:
+	
+	cannyEdge(Mat img, bool is_canny_cv, int canny_train_number)
+		img : original image use to initial width,height
+		is_canny_cv : true[use opencv canny method]; false[use custom canny method]
+		canny_train_number : the canny background image vector size.
+	
+Functions:
+
+	setCannyImg() : input original RGB image
+	then -> getCannyImg() : get original RGB image
+			getCannyFrame() : get canny image (Binary image)
+			getCannyForeground() : get the foreground canny image = canny image - canny background image;
+
+	updateCannyBackground() : input background image to update canny background image.
+*/
+/************************************************************************/
+
+#include <opencv2/opencv.hpp>
+#include <vector>
+using std::vector;
+
+using namespace std;
+using namespace cv;
+
+class cannyEdge
+{
+public:
+	cannyEdge(Mat img, bool is_canny_cv, int canny_train_number);
+	~cannyEdge();
+
+	// input original RGB image.
+	void setCannyImg(Mat canny_img);				// input image.
+	void updateCannyBackground(Mat canny_img);		// update background image.
+
+	Mat getCannyImg();
+	Mat getCannyFrame();
+	Mat getCannyForeground();
+
+	// the data belongs 0-1
+	Mat getCannyOriginalData(Mat canny_img);
+
+private:
+	void customCanny(Mat canny_img, Mat *canny_frame, int gsize);
+
+	void calcCannyFrame(Mat canny_img, Mat *canny_frame);
+	Mat calcCannyBackground(vector<Mat> *cannyBackground, int width, int height);
+	void calcCannyForeground(Mat canny_img, Mat *canny_frame, Mat *canny_foreground);
+
+	vector<Mat> cannyBackground;
+
+	Mat cannyForeground;
+	Mat cannyFrame;
+	Mat cannyImg;	// Channel one image
+
+	int width;
+	int height;
+
+	int trainNumber;
+
+	bool	CANNY_CV;
+	int		CANNY_TRAIN_NUMBER;
+};

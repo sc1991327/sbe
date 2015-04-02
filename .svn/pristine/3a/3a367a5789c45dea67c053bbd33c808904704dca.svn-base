@@ -1,0 +1,107 @@
+﻿#include <vector>
+using std::vector;
+
+#define rndSize 733
+
+// design data structure
+
+struct canny
+{
+	bool			cannyvalue;		// 0: not edge; 1: edge;
+};
+
+struct aux
+{
+	double	i_max;	// brightness max
+	double	i_min;	// brightness min
+	int		f;		// frequency
+	int		lamda;	// longest time interval
+	int		p;		// first time access
+	int		q;		// last time access
+};
+
+// each pixel <--> CODEWORD
+struct viword
+{
+	CvScalar	vm;			// -- RGB Vector
+   	aux			aux;	    // -- aux
+};
+
+// god parameters
+struct vibook_param
+{
+	int			train_num; 
+	int			t_miu;	
+	double		alpha;
+	double		beta;
+	int			epsilon1;	// setup in paraneter.txt
+	int			epsilon2;	// setup in paraneter.txt
+	int			epsilon3;	// setup in paraneter.txt
+	int			t_delete;			
+};
+
+// SBE framework
+class vibook
+{
+public:
+	vibook( int img_w, int img_h );
+	vibook( const vibook &cb );
+	~vibook();
+
+	void InitialBackground(IplImage *img, IplImage *cannyimg);
+	void UpdateBackground( IplImage *img ,IplImage *cannyimg);
+
+	void modelclear();
+
+	void getCannyBackground(IplImage *canny_background);
+	void getCannyForeground(IplImage *canny_foreground);
+	void getCannyFrame(IplImage *canny_frame);
+
+public:
+	struct vibook_param param;	    /* codebook parameter */
+
+private:
+	inline double colordis( CvScalar &xt, CvScalar &vm );
+	inline bool checkbrightness(double &i_one, double &i_two);
+	inline bool brightness( double i, double i_min, double i_max);
+
+	inline void largecontrol(IplImage *img);
+	inline void createpixelbackground(IplImage *img, int bg);
+
+	inline void customcanny(IplImage *frame, IplImage *edgeframe, int gsize);
+
+	inline void pushviword(vector < vector< viword > > &bg_model, IplImage *img, int pixel, int x, int y);
+
+	inline void initial_canny_model(IplImage *cannyimg);
+	inline void initial_bg_model(IplImage *img);
+	
+	inline void update_canny_model(IplImage *cannyimg);
+	inline void update_bg_model(IplImage *img, IplImage *canny_foreground, IplImage *result);
+
+	inline void updatetoneighbor(vector < vector< viword > > &bg_model,IplImage *img, IplImage *cannyforeground, CvScalar &xt,double vec_i, int x, int y);
+	inline void updatefromneighbor(vector < vector< viword > > &bg_model,IplImage *img, IplImage *cannyforeground, CvScalar &xt,double vec_i, int x, int y, int pixelx, int pixely);
+
+	inline void calccannyframe(IplImage *frame, IplImage *canny_frame);
+	inline void calccannyforeground(IplImage *canny_frame, IplImage *canny_foreground);
+private:
+	vector < vector< viword > >		bg_model;		// codeword data structure
+	vector < vector< canny > >		canny_model;	// canny data structure
+
+	IplImage *cannybackground;
+	IplImage *cannyforeground;
+	IplImage *cannyframe;
+
+	// show results
+	IplImage *codebookResult;
+	IplImage *cannycodebookResult;
+
+	int		cannydenominator;	// the frame numbers canny need to train.
+	int		cannynumerator;
+
+	int		backgroundwidth;
+	int		backgroundheight;
+	int		imagepixelnumber;
+
+	int		frame_num;
+
+};

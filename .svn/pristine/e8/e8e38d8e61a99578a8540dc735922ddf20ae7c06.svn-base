@@ -1,0 +1,67 @@
+#include <opencv2/opencv.hpp>
+#include <vector>
+using std::vector;
+
+using namespace std;
+using namespace cv;
+
+#define THRESHOLD_ORTDATA 50 // 20-60
+#define THERSHOLD_ORTVRT_CORR 0.5
+#define THERSHOLD_ORTVRT_AVG 25
+#define THERSHOLD_LEVEL_VRT4_AVG 12 
+#define THERSHOLD_LEVEL_VRT4_CORR 0.6
+#define THERSHOLD_LEVEL_ORT_CORR 0.6 // 0-1
+
+#define ORTWINDOWSIZE 3
+
+// define orientation
+enum mainOrt{o_up, o_up_left, o_left, o_down_left, o_down, o_down_right, o_right, o_up_right};
+
+struct pixelOrient
+{
+	// for each bolck
+	mainOrt	ortMain;
+	float	ortData;
+	
+	// for each cell of block(pixel)
+	int		ortNum[8];	// o_up, o_up_left, o_left, o_down_left, o_down, o_down_right, o_right, o_up_right
+	float	ortVrt[((2 * ORTWINDOWSIZE + 1) * (2 * ORTWINDOWSIZE + 1))];
+
+	// for each level two block
+	mainOrt	ortLevelOrt[4];
+	float	ortLevelVrt[4];
+
+	int		ortLevelOrtData[4][8];	// o_up, o_up_left, o_left, o_down_left, o_down, o_down_right, o_right, o_up_right
+	float	ortLevelVrtData[4][((ORTWINDOWSIZE + 1) * (ORTWINDOWSIZE + 1))];
+};
+
+class Orientation
+{
+public:
+	vector<pixelOrient>	OrtPixel;
+
+	Orientation();
+	~Orientation();
+
+	int InitialOrientation(Mat &image);
+	int DetectOrientation(Mat &image, Mat &result);
+
+private:
+
+	float correlection(float *array1, float *array2);
+	float absDiffAvg(float *array1, float *array2);
+	float ortCorrelection(mainOrt *array1, mainOrt *array2);
+
+	void updateOrientation(vector<pixelOrient> &OrtImg, vector<pixelOrient> &OrtPixel);
+	void pushOrientation(pixelOrient &pixelort, vector<pixelOrient> &OrtPixel, int pos);
+
+	void calcMainOrientation(vector<mainOrt> *OrtMain, vector<float> *OrtData, vector<pixelOrient> &OrtPixel, int width, int heigh);
+
+	void distMainOrientation(vector<mainOrt> *OrtMain, vector<float> *OrtData, int width, int heigh, int i, int j, pixelOrient &po);
+	void collMainOrientation(pixelOrient &po);
+
+	void calcOrientation(Mat &image, vector<mainOrt> &OrtMain, vector<float> &OrtData);
+	void calcPixelOrientation(int i_me, int i_up, int i_down, int i_left, int i_right, float &m, mainOrt &o);
+
+
+};

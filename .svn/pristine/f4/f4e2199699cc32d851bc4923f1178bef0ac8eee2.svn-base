@@ -1,0 +1,1185 @@
+﻿#include <opencv2/opencv.hpp>
+#include <opencv2/highgui/highgui.hpp>
+#include <opencv2/objdetect/objdetect.hpp>
+#include <opencv2/imgproc/imgproc.hpp>
+#include <opencv2/core/core.hpp>
+
+#include <iostream>  
+#include <stdio.h>
+#include <stdlib.h>
+#include <string>
+#include <math.h>
+#include <direct.h>
+#include <fstream>
+#include "ml.h"
+#include <utility>
+#include <list>
+#include <io.h>
+
+#include "FonderFiles.h"
+
+#include "SBE.h"
+#include "EDGE.h"
+#include "lbp.hpp"
+#include "OpticalFlow.h"
+#include "Orientation.h"
+
+using namespace std;
+using namespace cv;
+
+// Choose gaussian by Flag
+static bool GAUSSIAN_BG_MODEL_FLAG = true;
+static bool GAUSSIAN_CANNY_MODEL_FLAG = true;
+
+int			photostart = 1000;
+int			photonum;
+
+// -----------------------------------------------------------------------------------------------------------------
+
+// image, video input to images
+// outputs : images(original image), gaus(image by gaussian)
+void loadImages(string path, vector<IplImage*> &images, vector<IplImage*> &gaus)
+{
+	struct _finddata_t  c_file;
+	long fh;
+
+	string tempPath1 = path + "\\*.*";
+
+	IplImage *temp;
+	IplImage *gg;
+
+	if ((fh = _findfirst(tempPath1.c_str(), &c_file)) != -1)
+	{
+		while (_findnext(fh, &c_file) == 0)
+		{
+			if (strncmp(c_file.name, ".", 1) != 0 && strncmp(c_file.name, "..", 2) != 0)
+			{
+				//printf("%s\n", c_file.name);
+				string file = path + "\\" + c_file.name;
+
+				temp = cvLoadImage(const_cast<char*>(file.c_str()), 3);
+				gg = cvCreateImage(cvSize(temp->width, temp->height), IPL_DEPTH_8U, 3);
+
+				// smooth is much good for results!
+				cvSmooth(temp, gg, CV_GAUSSIAN, 3, 3);
+
+				images.push_back(temp);
+				gaus.push_back(gg);
+			}
+		}
+	}
+
+}
+
+void testSBE(){
+	// 1. -- load images --
+	vector<IplImage*> _imgArray;		// original image
+	vector<IplImage*> _gauArray;		// image by gaussian smooth
+	_imgArray.clear();
+	_gauArray.clear();
+	loadImages("C:\\testImages\\Perception\\WaterSurface", _imgArray, _gauArray);
+	cout << "Load photo successes" << endl;
+
+	// 2. -- data input --
+	int parameter_array[3] = { 10, 10, 15 };
+
+	// 3. -- start handing --
+	IplImage *gaussian;
+	int width = _imgArray.at(0)->width;
+	int height = _imgArray.at(0)->height;
+	gaussian = cvCreateImage(cvSize(width, height), IPL_DEPTH_8U, 3);
+
+	// initial global parameters
+	int train_frame = 0;
+	photonum = photostart;
+
+	// initial vibook's parameters
+	cout << "Construction SBE...";
+	vibook vibook(width, height);
+	cout << "done" << endl;
+	// set parameters
+	vibook.param.epsilon1 = parameter_array[0];
+	vibook.param.epsilon2 = parameter_array[1];
+	vibook.param.epsilon3 = parameter_array[2];
+	// initial background
+	while (train_frame < vibook.param.train_num)	// the number of frames used to train ( here is only one )
+	{
+		char str[1024];
+		if (GAUSSIAN_BG_MODEL_FLAG == true)			// bg_model used image by gaussian smooth or not
+		{
+			if (GAUSSIAN_CANNY_MODEL_FLAG == true)	// canny_model used image by gaussian smooth or not
+			{
+				vibook.InitialBackground(_gauArray[train_frame], _gauArray[train_frame]);
+			}
+			else
+			{
+				vibook.InitialBackground(_gauArray[train_frame], _imgArray[train_frame]);
+			}
+		}
+		else
+		{
+			if (GAUSSIAN_CANNY_MODEL_FLAG == true)
+			{
+				vibook.InitialBackground(_imgArray[train_frame], _gauArray[train_frame]);
+			}
+			else
+			{
+				vibook.InitialBackground(_imgArray[train_frame], _imgArray[train_frame]);
+			}
+		}
+		cvWaitKey(200);
+		train_frame++;
+		photonum++;
+	}
+
+	// UpdateBackground background
+	cout << _imgArray.size() << endl;
+	while (train_frame < _imgArray.size())
+	{
+		if (GAUSSIAN_BG_MODEL_FLAG == true)
+		{
+			if (GAUSSIAN_CANNY_MODEL_FLAG == true)
+			{
+				vibook.UpdateBackground(_gauArray[train_frame], _gauArray[train_frame]);
+			}
+			else
+			{
+				vibook.UpdateBackground(_gauArray[train_frame], _imgArray[train_frame]);
+			}
+		}
+		else
+		{
+			if (GAUSSIAN_CANNY_MODEL_FLAG == true)
+			{
+				vibook.UpdateBackground(_imgArray[train_frame], _gauArray[train_frame]);
+			}
+			else
+			{
+				vibook.UpdateBackground(_imgArray[train_frame], _imgArray[train_frame]);
+			}
+		}
+		photonum++;
+		train_frame++;
+	}
+
+	// clear
+	vibook.modelclear();
+	vibook.~vibook();
+}
+
+// load all image names
+void __getAllFileNames(string path, vector<string>& files)
+{
+	long		hFile = 0;
+	struct		_finddata_t fileinfo;
+	string		p;
+
+	if ((hFile = _findfirst(p.assign(path).append("\\*").c_str(), &fileinfo)) != -1)
+	{
+		do
+		{
+			if ((fileinfo.attrib &  _A_SUBDIR))  //比较文件类型是否是文件夹
+			{
+				if (strcmp(fileinfo.name, ".") != 0 && strcmp(fileinfo.name, "..") != 0)
+				{
+					files.push_back(p.assign(path).append("\\").append(fileinfo.name));
+					__getAllFileNames(p.assign(path).append("\\").append(fileinfo.name), files);
+				}
+			}
+			else
+			{
+				files.push_back(p.assign(path).append("\\").append(fileinfo.name));
+			}
+		} while (_findnext(hFile, &fileinfo) == 0);  //寻找下一个，成功返回0，否则-1
+		_findclose(hFile);
+	}
+}
+
+void __getAllImages(vector<string> *filenames, vector<Mat> *images){
+
+	for (vector<string>::iterator it = filenames->begin(); it != filenames->end(); ++it)
+	{
+		Mat temp = imread(*it);
+		images->push_back(temp);
+	}
+
+}
+
+void getImages(string path, vector<Mat> *images){
+
+	vector<string>	imagenames;
+
+	__getAllFileNames(path, imagenames);
+	__getAllImages(&imagenames, images);
+
+}
+
+// -----------------------------------------------------------------------------------------------------------------
+
+class WatershedSegmenter{
+private:
+	Mat markers;
+public:
+	void setMarkers(Mat& markerImage)
+	{
+		markerImage.convertTo(markers, CV_32S);
+	}
+
+	Mat process(Mat &image)
+	{
+		watershed(image, markers);
+		markers.convertTo(markers, CV_8U);
+		return markers;
+	}
+};
+
+// ----------------------------------------------------------------------------------------------------------------
+
+// show RGBimage + MOG = foreground result.
+void testMOG(){
+
+	//global variables
+	Mat frame;				//current frame
+	Mat fgMaskMOG;			//fg mask generated by MOG method
+
+	Ptr< BackgroundSubtractor> pMOG;			//MOG Background subtractor
+	pMOG = new BackgroundSubtractorMOG();
+
+	char fileName[100] = "test_original.avi";	//Gate1_175_p1.avi"; //mm2.avi"; //";//_p1.avi";
+	VideoCapture stream1(fileName);				//0 is the id of video device.0 if you have only one camera   
+
+	//unconditional loop   
+	while (true) {
+		Mat cameraFrame;
+		if (!(stream1.read(frame))) //get one frame form video   
+			break;
+
+		pMOG->operator()(frame, fgMaskMOG);
+
+		imshow("frame", frame);
+		imshow("MOG", fgMaskMOG);
+
+		if (waitKey(30) >= 0)
+			break;
+	}
+
+}
+
+void testMOGCompareGT(){
+
+	//MOG Background subtractor
+	Ptr< BackgroundSubtractor> pMOG;
+	pMOG = new BackgroundSubtractorMOG();
+
+	string strd = "../Perception/WaterSurface";
+	string strg = "../Perception/GT/WaterSurface";
+	string strn = strd + "/WaterSurface1400.bmp";
+	Mat src = imread(strn);
+
+	cannyEdge cannyedge = cannyEdge(src, true, 10); // initial : use to get height, width
+
+	for (int sn = 1400; sn < 1630; sn++)
+	{
+
+		ostringstream ss, ssgt;
+		ss << strd << "/WaterSurface" << sn << ".bmp";
+		ssgt << strg << "/gt_new_WaterSurface" << sn << ".bmp";
+		string filename = ss.str();
+		string filenameGT = ssgt.str();
+
+		Mat src = imread(filename);
+		Mat srcGT = imread(filenameGT,0);
+		threshold(srcGT, srcGT, 0, 255, CV_THRESH_BINARY | CV_THRESH_OTSU);
+
+		// MOG to foreground
+		Mat srcMOG;
+		pMOG->operator()(src, srcMOG);
+		threshold(srcMOG, srcMOG, 0, 255, CV_THRESH_BINARY | CV_THRESH_OTSU);
+
+		// exist GT
+		if (srcGT.rows != 0)
+		{
+
+			// the difference between foreground and GT
+			Mat img_and, img_or;
+
+			bitwise_and(srcMOG, srcGT, img_and);
+			bitwise_or(srcMOG, srcGT, img_or);
+
+			vector<Mat> images(3);
+			images.at(0) = img_and;			//for blue channel
+			images.at(1) = img_or;			//for green channel
+			images.at(2) = srcMOG;			//for red channel
+			Mat difColorImage;
+			merge(images, difColorImage);
+
+			imshow("src", src);
+			imshow("frameMOG", srcMOG);
+			imshow("dif", difColorImage);
+
+			waitKey(300);
+		}
+
+	}
+
+}
+
+// show canny result.
+void testEdge(){
+
+	string strd = "../Perception/WaterSurface";
+	string strn = strd + "/WaterSurface1400.bmp";
+	Mat src = imread(strn);
+
+	cannyEdge cannyedge = cannyEdge(src, false, 10); // initial : use to get height, width
+
+	for (int sn = 1400; sn < 1600; sn++)
+	{
+
+		ostringstream ss;
+		ss << strd << "/WaterSurface" << sn << ".bmp";
+		string filename = ss.str();
+
+		// image in
+		Mat src = imread(filename, 0);
+		GaussianBlur(src, src, Size(5, 5), 0, 0);
+		cannyedge.setCannyImg(src);
+
+		// image out
+		Mat dst;
+		dst = cannyedge.getCannyForeground();
+		//dst = cannyedge.getCannyFrame();
+
+		imshow("src", src);
+		imshow("dst", dst);
+		waitKey(100);
+
+	}
+	
+}
+
+// # 09221
+void testEdgeRGB(){
+
+	string strd = "../Perception/WaterSurface";
+	string strn = strd + "/WaterSurface1400.bmp";
+	Mat src = imread(strn);
+
+	cannyEdge cannyedge = cannyEdge(src, false, 10); // initial : use to get height, width
+
+	for (int sn = 1400; sn < 1600; sn++)
+	{
+
+		ostringstream ss;
+		ss << strd << "/WaterSurface" << sn << ".bmp";
+		string filename = ss.str();
+
+		// get RGB image vertor
+		vector<Mat> rgb;
+		Mat frame = imread(filename);
+		split(frame, rgb);
+
+		// image in
+		Mat srcR = rgb[0];
+		GaussianBlur(srcR, srcR, Size(5, 5), 0, 0);
+		cannyedge.setCannyImg(srcR);
+		// image out
+		Mat dstR;
+		dstR = cannyedge.getCannyForeground();
+		//dst = cannyedge.getCannyFrame();
+
+		// image in
+		Mat srcG = rgb[1];
+		GaussianBlur(srcG, srcG, Size(5, 5), 0, 0);
+		cannyedge.setCannyImg(srcG);
+		// image out
+		Mat dstG;
+		dstG = cannyedge.getCannyForeground();
+
+		// image in
+		Mat srcB = rgb[2];
+		GaussianBlur(srcB, srcB, Size(5, 5), 0, 0);
+		cannyedge.setCannyImg(srcB);
+		// image out
+		Mat dstB;
+		dstB = cannyedge.getCannyForeground();
+
+		// combine RGB
+		vector<Mat> images(3);
+		images.at(0) = dstR;			//for blue channel
+		images.at(1) = dstG;			//for green channel
+		images.at(2) = dstB;			//for red channel
+		Mat comColorImage;
+		merge(images, comColorImage);
+
+		imshow("src", src);
+		imshow("dst", comColorImage);
+		waitKey(100);
+
+	}
+
+}
+
+// show canny + MOG = foreground result. 
+void testEdgeMOG(){
+
+	//MOG Background subtractor
+	Ptr< BackgroundSubtractor> pMOG;
+	pMOG = new BackgroundSubtractorMOG();
+
+	string strd = "../Perception/WaterSurface";
+	string strn = strd + "/WaterSurface1400.bmp";
+	Mat src = imread(strn);
+
+	cannyEdge cannyedge = cannyEdge(src, true, 10); // initial : use to get height, width
+
+	for (int sn = 1400; sn < 1600; sn++)
+	{
+
+		ostringstream ss;
+		ss << strd << "/WaterSurface" << sn << ".bmp";
+		string filename = ss.str();
+
+		Mat src = imread(filename);
+		Mat srccanny = cannyedge.getCannyOriginalData(src);
+
+		Mat frameMOG;
+		pMOG->operator()(srccanny, frameMOG);
+
+		imshow("src", src);
+		imshow("dst", srccanny);
+		imshow("frameMOG", frameMOG);
+		waitKey(100);
+
+	}
+
+}
+
+// show LBP result
+void testLBP(){
+
+	char fileName[100] = "test_original.avi";	//Gate1_175_p1.avi"; //mm2.avi"; //";//_p1.avi";
+	VideoCapture cap(fileName);					//0 is the id of video device.0 if you have only one camera   
+
+	// initial values
+	int radius = 1;			// 1 - 32
+	int neighbors = 8;		// 1 - 32
+	int lbp_operator = 1;	// 0:ELBP; 1:OLBP; 2:VARLBP
+
+	// matrices used
+	Mat frame;		// always references the last frame
+	Mat dst;		// image after preprocessing
+	Mat lbp;		// lbp image
+
+	while (true) {
+
+		if (!(cap.read(frame))) //get one frame form video   
+			break;
+
+		cvtColor(frame, dst, CV_BGR2GRAY);
+		GaussianBlur(dst, dst, Size(7, 7), 5, 3, BORDER_CONSTANT); // tiny bit of smoothing is always a good idea
+		// LBP
+		switch (lbp_operator) {
+		case 0:
+			lbp::ELBP(dst, lbp, radius, neighbors); // use the extended operator
+			break;
+		case 1:
+			lbp::OLBP(dst, lbp); // use the original operator
+			break;
+		case 2:
+			lbp::VARLBP(dst, lbp, radius, neighbors);
+			break;
+		}
+		normalize(lbp, lbp, 0, 255, NORM_MINMAX, CV_8UC1);
+
+		imshow("dst", dst);
+		imshow("lbp", lbp);
+		waitKey(100);
+
+	}
+
+}
+
+void testLBPMOGCompareGT(){
+
+	//MOG Background subtractor
+	Ptr< BackgroundSubtractor> pMOG;
+	pMOG = new BackgroundSubtractorMOG();
+
+	string strd = "C:/testImages/Perception/WaterSurface";
+	string strg = "C:/testImages/Perception/GT/WaterSurface";
+	string strn = strd + "/WaterSurface1400.bmp";
+	Mat src = imread(strn);
+
+	cannyEdge cannyedge = cannyEdge(src, true, 10); // initial : use to get height, width
+
+	for (int sn = 1400; sn < 1630; sn++)
+	{
+
+		ostringstream ss, ssgt;
+		ss << strd << "/WaterSurface" << sn << ".bmp";
+		ssgt << strg << "/gt_new_WaterSurface" << sn << ".bmp";
+		string filename = ss.str();
+		string filenameGT = ssgt.str();
+
+		Mat src = imread(filename, 0);
+		Mat srcGT = imread(filenameGT, 0);
+		threshold(srcGT, srcGT, 0, 255, CV_THRESH_BINARY | CV_THRESH_OTSU);
+
+		// LBP
+		Mat lbp;
+		GaussianBlur(src, src, Size(7, 7), 5, 3, BORDER_CONSTANT); // tiny bit of smoothing is always a good idea
+		int radius = 1;			// 1 - 32
+		int neighbors = 4;		// 1 - 32
+		lbp::ELBP(src, lbp, radius, neighbors); // use the extended operator
+		lbp::OLBP(src, lbp); // use the original operator
+		lbp::VARLBP(src, lbp, radius, neighbors);
+		normalize(lbp, lbp, 0, 255, NORM_MINMAX, CV_8UC1);
+
+		// MOG to foreground
+		Mat srcMOG;
+		pMOG->operator()(src, srcMOG);
+		threshold(srcMOG, srcMOG, 0, 255, CV_THRESH_BINARY | CV_THRESH_OTSU);
+
+		// exist GT
+		if (srcGT.rows != 0 )
+		{
+
+			// the difference between foreground and GT
+			Mat img_and, img_or;
+
+			bitwise_and(srcMOG, srcGT, img_and);
+			bitwise_or(srcMOG, srcGT, img_or);
+
+			vector<Mat> images(3);
+			images.at(0) = img_and;			//for blue channel
+			images.at(1) = img_or;			//for green channel
+			images.at(2) = srcMOG;			//for red channel
+			Mat difColorImage;
+			merge(images, difColorImage);
+
+			imshow("src", src);
+			imshow("frameMOG", srcMOG);
+			imshow("dif", difColorImage);
+
+			waitKey(1000);
+		}
+
+	}
+
+
+}
+
+// show optical flow result.
+
+void testOpticalFlow(){
+
+	OpticalFlow opticalflow;
+
+	char fileName[100] = "test_original.avi";	//Gate1_175_p1.avi"; //mm2.avi"; //";//_p1.avi";
+	VideoCapture cap(fileName);					//0 is the id of video device.0 if you have only one camera   
+
+	Mat flow;
+	Mat frame, preframe;
+	cap.read(frame);
+	while (true) {
+
+		// calculate optical flow by (i, i+1)
+		frame.copyTo(preframe);
+		if (!(cap.read(frame))) //get one frame form video   
+		{
+			break;
+		}
+
+		// get optical flow
+		flow = opticalflow.showOpticalFlow(frame, preframe);
+
+		// show
+		imshow("frame", frame);
+		imshow("flow", flow);
+		waitKey(250);
+	
+	}
+
+}
+
+// # 09222
+void testOpticalFlowData(){
+
+	OpticalFlow opticalflow;
+
+	//MOG Background subtractor
+	Ptr< BackgroundSubtractor> pMOGX;
+	pMOGX = new BackgroundSubtractorMOG();
+	Ptr< BackgroundSubtractor> pMOGY;
+	pMOGY = new BackgroundSubtractorMOG();
+
+	string strd = "C://testImages//Perception//WaterSurface";
+	string strg = "C://testImages//Perception//GT//WaterSurface";
+	string strn = strd + "/WaterSurface1299.bmp";
+	Mat src = imread(strn);
+	Mat srcPre;
+	Mat flowX,flowY;
+
+	cannyEdge cannyedge = cannyEdge(src, true, 10); // initial : use to get height, width
+
+	for (int sn = 1300; sn < 1630; sn++)
+	{
+
+		ostringstream ss, ssgt;
+		ss << strd << "/WaterSurface" << sn << ".bmp";
+		ssgt << strg << "/gt_new_WaterSurface" << sn << ".bmp";
+		string filename = ss.str();
+		string filenameGT = ssgt.str();
+
+		src.copyTo(srcPre);
+		Mat src = imread(filename);
+		Mat srcGT = imread(filenameGT, 0);
+		threshold(srcGT, srcGT, 0, 255, CV_THRESH_BINARY | CV_THRESH_OTSU);
+
+		// Optical Flow
+		GaussianBlur(src, src, Size(3, 3), 0, 0);
+		GaussianBlur(srcPre, srcPre, Size(3, 3), 0, 0);
+
+		flowX = opticalflow.getOpticalFlowX(src, srcPre);
+		flowY = opticalflow.getOpticalFlowY(src, srcPre);
+
+		imshow("flowX", flowX);
+		imshow("flowY", flowY);
+
+		// MOG to foreground
+		Mat flowMOGX,flowMOGY;
+		pMOGX->operator()(flowX, flowMOGX);
+		pMOGY->operator()(flowY, flowMOGY);
+		threshold(flowMOGX, flowMOGX, 0, 255, CV_THRESH_BINARY | CV_THRESH_OTSU);
+		threshold(flowMOGY, flowMOGY, 0, 255, CV_THRESH_BINARY | CV_THRESH_OTSU);
+
+		// exist GT
+		if (srcGT.rows != 0)
+		{
+
+			// the difference between foreground and GT
+			Mat img_x_and, img_x_or;
+			Mat img_y_and, img_y_or;
+			Mat img_and, img_or;
+
+			bitwise_and(flowMOGX, srcGT, img_x_and);
+			bitwise_and(flowMOGY, srcGT, img_y_and);
+			bitwise_or(flowMOGX, srcGT, img_x_or);
+			bitwise_or(flowMOGY, srcGT, img_y_or);
+
+			bitwise_and(flowMOGX, flowMOGY, img_and);
+			bitwise_or(flowMOGX, flowMOGY, img_or);
+
+			vector<Mat> images_x(3);
+			images_x.at(0) = img_x_and;			//for blue channel
+			images_x.at(1) = img_x_or;			//for green channel
+			images_x.at(2) = flowMOGX;			//for red channel
+			Mat difColorImageX;
+			merge(images_x, difColorImageX);
+
+			vector<Mat> images_y(3);
+			images_y.at(0) = img_y_and;			//for blue channel
+			images_y.at(1) = img_y_or;			//for green channel
+			images_y.at(2) = flowMOGY;			//for red channel
+			Mat difColorImageY;
+			merge(images_y, difColorImageY);
+
+			vector<Mat> images(3);
+			images.at(0) = img_or;			//for blue channel
+			images.at(1) = srcGT;			//for green channel
+			images.at(2) = srcGT;			//for red channel
+			Mat difColorImage;
+			merge(images, difColorImage);
+
+			imshow("src", src);
+			imshow("difX", difColorImageX);
+			imshow("difY", difColorImageY);
+			imshow("dif", difColorImage);
+
+			waitKey(2000);
+		}
+
+	}
+
+}
+
+// -------------------------------------------------------------------------- 加速度 ---------------------------------------
+void testOpticalFlowSpeed(){
+
+	OpticalFlow opticalflow;
+
+	//MOG Background subtractor
+	Ptr< BackgroundSubtractor> pMOGX;
+	pMOGX = new BackgroundSubtractorMOG();
+	Ptr< BackgroundSubtractor> pMOGY;
+	pMOGY = new BackgroundSubtractorMOG();
+
+	string strd = "C://testImages//Perception//WaterSurface";
+	string strg = "C://testImages//Perception//GT//WaterSurface";
+	string strn = strd + "/WaterSurface1299.bmp";
+	Mat src = imread(strn);
+	Mat srcPre;
+	Mat flowX, flowY;
+
+	cannyEdge cannyedge = cannyEdge(src, true, 10); // initial : use to get height, width
+
+	for (int sn = 1300; sn < 1630; sn++)
+	{
+
+		ostringstream ss, ssgt;
+		ss << strd << "/WaterSurface" << sn << ".bmp";
+		ssgt << strg << "/gt_new_WaterSurface" << sn << ".bmp";
+		string filename = ss.str();
+		string filenameGT = ssgt.str();
+
+		src.copyTo(srcPre);
+		Mat src = imread(filename);
+		Mat srcGT = imread(filenameGT, 0);
+		threshold(srcGT, srcGT, 0, 255, CV_THRESH_BINARY | CV_THRESH_OTSU);
+
+		// Optical Flow
+		GaussianBlur(src, src, Size(3, 3), 0, 0);
+		GaussianBlur(srcPre, srcPre, Size(3, 3), 0, 0);
+
+		flowX = opticalflow.getOpticalFlowX(src, srcPre);
+		flowY = opticalflow.getOpticalFlowY(src, srcPre);
+
+		imshow("flowX", flowX);
+		imshow("flowY", flowY);
+
+		// MOG to foreground
+		Mat flowMOGX, flowMOGY;
+		pMOGX->operator()(flowX, flowMOGX);
+		pMOGY->operator()(flowY, flowMOGY);
+		threshold(flowMOGX, flowMOGX, 0, 255, CV_THRESH_BINARY | CV_THRESH_OTSU);
+		threshold(flowMOGY, flowMOGY, 0, 255, CV_THRESH_BINARY | CV_THRESH_OTSU);
+
+		// exist GT
+		if (srcGT.rows != 0)
+		{
+
+			// the difference between foreground and GT
+			Mat img_x_and, img_x_or;
+			Mat img_y_and, img_y_or;
+			Mat img_and, img_or;
+
+			bitwise_and(flowMOGX, srcGT, img_x_and);
+			bitwise_and(flowMOGY, srcGT, img_y_and);
+			bitwise_or(flowMOGX, srcGT, img_x_or);
+			bitwise_or(flowMOGY, srcGT, img_y_or);
+
+			bitwise_and(flowMOGX, flowMOGY, img_and);
+			bitwise_or(flowMOGX, flowMOGY, img_or);
+
+			vector<Mat> images_x(3);
+			images_x.at(0) = img_x_and;			//for blue channel
+			images_x.at(1) = img_x_or;			//for green channel
+			images_x.at(2) = flowMOGX;			//for red channel
+			Mat difColorImageX;
+			merge(images_x, difColorImageX);
+
+			vector<Mat> images_y(3);
+			images_y.at(0) = img_y_and;			//for blue channel
+			images_y.at(1) = img_y_or;			//for green channel
+			images_y.at(2) = flowMOGY;			//for red channel
+			Mat difColorImageY;
+			merge(images_y, difColorImageY);
+
+			vector<Mat> images(3);
+			images.at(0) = img_or;			//for blue channel
+			images.at(1) = srcGT;			//for green channel
+			images.at(2) = srcGT;			//for red channel
+			Mat difColorImage;
+			merge(images, difColorImage);
+
+			imshow("src", src);
+			imshow("difX", difColorImageX);
+			imshow("difY", difColorImageY);
+			imshow("dif", difColorImage);
+
+			waitKey(2000);
+		}
+
+	}
+
+}
+
+void testOpticalFlowMOGCompareGT(){
+
+	OpticalFlow opticalflow;
+
+	//MOG Background subtractor
+	Ptr< BackgroundSubtractor> pMOG;
+	pMOG = new BackgroundSubtractorMOG();
+
+	string strd = "../Perception/WaterSurface";
+	string strg = "../Perception/GT/WaterSurface";
+	string strn = strd + "/WaterSurface1400.bmp";
+	Mat src = imread(strn);
+	Mat srcPre; 
+	Mat flow;
+
+	cannyEdge cannyedge = cannyEdge(src, true, 10); // initial : use to get height, width
+
+	for (int sn = 1400; sn < 1630; sn++)
+	{
+
+		ostringstream ss, ssgt;
+		ss << strd << "/WaterSurface" << sn << ".bmp";
+		ssgt << strg << "/gt_new_WaterSurface" << sn << ".bmp";
+		string filename = ss.str();
+		string filenameGT = ssgt.str();
+
+		src.copyTo(srcPre);
+		Mat src = imread(filename);
+		Mat srcGT = imread(filenameGT, 0);
+		threshold(srcGT, srcGT, 0, 255, CV_THRESH_BINARY | CV_THRESH_OTSU);
+
+		// Optical Flow
+		flow = opticalflow.showOpticalFlow(src, srcPre);
+
+		// MOG to foreground
+		Mat flowMOG;
+		pMOG->operator()(flow, flowMOG);
+		threshold(flowMOG, flowMOG, 0, 255, CV_THRESH_BINARY | CV_THRESH_OTSU);
+
+		// exist GT
+		if (srcGT.rows != 0)
+		{
+
+			// the difference between foreground and GT
+			Mat img_and, img_or;
+
+			bitwise_and(flowMOG, srcGT, img_and);
+			bitwise_or(flowMOG, srcGT, img_or);
+
+			vector<Mat> images(3);
+			images.at(0) = img_and;			//for blue channel
+			images.at(1) = img_or;			//for green channel
+			images.at(2) = flowMOG;			//for red channel
+			Mat difColorImage;
+			merge(images, difColorImage);
+
+			imshow("src", src);
+			imshow("flowMOG", flowMOG);
+			imshow("dif", difColorImage);
+
+			waitKey(2000);
+		}
+
+	}
+
+}
+
+// # 09231
+void testWatershed(){
+
+	Mat image = imread("aton_hallway_0025.jpg");
+	Mat blank(image.size(), CV_8U, Scalar(0xFF));
+	Mat dest;
+	imshow("originalimage", image);
+
+	// Create markers image
+	Mat markers(image.size(), CV_8U, Scalar(-1));
+	//top rectangle
+	markers(Rect(0, 0, image.cols, 5)) = Scalar::all(1);
+	//bottom rectangle
+	markers(Rect(0, image.rows - 5, image.cols, 5)) = Scalar::all(1);
+	//left rectangle
+	markers(Rect(0, 0, 5, image.rows)) = Scalar::all(1);
+	//right rectangle
+	markers(Rect(image.cols - 5, 0, 5, image.rows)) = Scalar::all(1);
+	//centre rectangle
+	int centreW = image.cols / 4;
+	int centreH = image.rows / 4;
+	markers(Rect((image.cols / 2) - (centreW / 2), (image.rows / 2) - (centreH / 2), centreW, centreH)) = Scalar::all(2);
+	markers.convertTo(markers, CV_BGR2GRAY);
+	imshow("markers", markers);
+
+	//Create watershed segmentation object
+	WatershedSegmenter segmenter;
+	segmenter.setMarkers(markers);
+	Mat wshedMask = segmenter.process(image);
+	Mat mask;
+	convertScaleAbs(wshedMask, mask, 1, 0);
+	double thresh = threshold(mask, mask, 1, 255, THRESH_BINARY);
+	bitwise_and(image, image, dest, mask);
+	dest.convertTo(dest, CV_8U);
+
+	imshow("final_result", mask);
+	waitKey(0);
+
+}
+
+// # 09232
+void testWatershedByOriginalImageAndLBPMOGMask(){
+
+	//MOG Background subtractor
+	Ptr< BackgroundSubtractor> pMOG;
+	pMOG = new BackgroundSubtractorMOG();
+
+	string strd = "../Perception/Campus";
+	string strg = "../Perception/GT/Campus";
+	string strn = strd + "/trees1000.bmp";
+	Mat src = imread(strn);
+
+	cannyEdge cannyedge = cannyEdge(src, true, 10); // initial : use to get height, width
+
+	for (int sn = 1000; sn < 2400; sn++)
+	{
+
+		ostringstream ss, ssgt;
+		ss << strd << "/trees" << sn << ".bmp";
+		ssgt << strg << "/gt_new_trees" << sn << ".bmp";
+		string filename = ss.str();
+		string filenameGT = ssgt.str();
+
+		Mat src = imread(filename, 0);
+		Mat srcRGB = imread(filename);
+		Mat srcGT = imread(filenameGT, 0);
+		threshold(srcGT, srcGT, 0, 255, CV_THRESH_BINARY | CV_THRESH_OTSU);
+
+		imshow("srcRGB", srcRGB);
+
+		// LBP
+		Mat lbp;
+		GaussianBlur(src, src, Size(7, 7), 5, 3, BORDER_CONSTANT); // tiny bit of smoothing is always a good idea
+		int radius = 1;			// 1 - 32
+		int neighbors = 4;		// 1 - 32
+		lbp::ELBP(src, lbp, radius, neighbors); // use the extended operator
+		lbp::OLBP(src, lbp); // use the original operator
+		lbp::VARLBP(src, lbp, radius, neighbors);
+		normalize(lbp, lbp, 0, 255, NORM_MINMAX, CV_8UC1);
+
+		// MOG to foreground
+		Mat srcMOG;
+		pMOG->operator()(src, srcMOG);
+		threshold(srcMOG, srcMOG, 0, 255, CV_THRESH_BINARY | CV_THRESH_OTSU);
+
+		imshow("srcMOG", srcMOG);
+
+		vector<Mat> temp(4);
+		temp.at(0) = srcMOG;			//for blue channel
+		temp.at(1) = srcMOG;			//for green channel
+		temp.at(2) = srcMOG;			//for red channel
+		temp.at(3) = srcMOG;			//for alpha channel
+		Mat mog;
+		merge(temp, mog);
+
+		// watershed mask
+		Mat markers(mog.size(), CV_8U, Scalar(-1));  // CV_8U means RGBA eanch 8 bit.
+		// -- simulate background mark
+		markers(Rect(0, 0, mog.cols, 5)) = Scalar::all(1);
+		markers(Rect(0, mog.rows - 5, mog.cols, 5)) = Scalar::all(1);
+		markers(Rect(0, 0, 5, mog.rows)) = Scalar::all(1);
+		markers(Rect(mog.cols - 5, 0, 5, mog.rows)) = Scalar::all(1);
+		// -- LBP MOG foreground mark
+		for (int i = 0; i < mog.rows; i++)
+		{
+			for (int j = 0; j < mog.cols; j++)
+			{
+				if (mog.at<int>(i, j) != 0)
+				{
+					markers(Rect(j, i, 1, 1)) = Scalar::all(2);
+				}
+			}
+		}
+		markers.convertTo(markers, CV_BGR2GRAY); //这里不清楚 Gray 到底是什么数据结构！ 这句话加上能imshow出row不对的图，去掉inshow不出东西
+		
+		imshow("markers", markers);
+
+		WatershedSegmenter segmenter;
+		segmenter.setMarkers(markers);
+		Mat wshedMask = segmenter.process(srcRGB);
+		Mat mask;
+		Mat dest;
+		convertScaleAbs(wshedMask, mask, 1, 0);
+		double thresh = threshold(mask, mask, 1, 255, THRESH_BINARY);
+		bitwise_and(srcRGB, srcRGB, dest, mask);
+		dest.convertTo(dest, CV_8U);
+
+		imshow("final_result", dest);
+
+		waitKey(100);
+
+	}
+
+}
+
+// # 09241
+void testKmeansByOriginalImage(){
+
+	//global variables
+	Mat frame;				//current frame
+	Mat fgMaskMOG;			//fg mask generated by MOG method
+
+	char fileName[100] = "test_original.avi";	//Gate1_175_p1.avi"; //mm2.avi"; //";//_p1.avi";
+	VideoCapture stream1(fileName);				//0 is the id of video device.0 if you have only one camera   
+
+	//unconditional loop   
+	while (true) {
+		Mat cameraFrame;
+		if (!(stream1.read(frame))) //get one frame form video   
+			break;
+
+		Mat src = frame;
+		Mat samples(src.rows * src.cols, 3, CV_32F);
+		for (int y = 0; y < src.rows; y++)
+			for (int x = 0; x < src.cols; x++)
+				for (int z = 0; z < 3; z++)
+					samples.at<float>(y + x*src.rows, z) = src.at<Vec3b>(y, x)[z];
+
+		int clusterCount = 2;	// K
+		Mat labels;				// Input/output integer array that stores the cluster indices for every sample.
+		int attempts = 3;		// Iteration times
+		Mat centers;			// Output matrix of the cluster centers, one row per each cluster center.
+		kmeans(samples, clusterCount, labels, TermCriteria(CV_TERMCRIT_ITER | CV_TERMCRIT_EPS, 10000, 0.0001), attempts, KMEANS_PP_CENTERS, centers);
+
+		Mat new_image(src.size(), src.type());
+		for (int y = 0; y < src.rows; y++)
+		{
+			for (int x = 0; x < src.cols; x++)
+			{
+			int cluster_idx = labels.at<int>(y + x*src.rows, 0);
+			new_image.at<Vec3b>(y, x)[0] = centers.at<float>(cluster_idx, 0);
+			new_image.at<Vec3b>(y, x)[1] = centers.at<float>(cluster_idx, 1);
+			new_image.at<Vec3b>(y, x)[2] = centers.at<float>(cluster_idx, 2);
+			}
+		}
+
+		imshow("frame", frame);
+		imshow("clustered image", new_image);
+		waitKey(100);
+
+	}
+
+}
+
+// # 09242
+void testKmeansByOpticalFlowImage(){
+
+	OpticalFlow opticalflow;
+
+	//MOG Background subtractor
+	Ptr< BackgroundSubtractor> pMOGX;
+	pMOGX = new BackgroundSubtractorMOG();
+	Ptr< BackgroundSubtractor> pMOGY;
+	pMOGY = new BackgroundSubtractorMOG();
+
+	string strd = "../Perception/WaterSurface";
+	string strg = "../Perception/GT/WaterSurface";
+	string strn = strd + "/WaterSurface1299.bmp";
+	Mat src = imread(strn);
+	Mat srcPre;
+	Mat flowX, flowY;
+
+	cannyEdge cannyedge = cannyEdge(src, true, 10); // initial : use to get height, width
+
+	for (int sn = 1300; sn < 1630; sn++)
+	{
+
+		ostringstream ss, ssgt;
+		ss << strd << "/WaterSurface" << sn << ".bmp";
+		ssgt << strg << "/gt_new_WaterSurface" << sn << ".bmp";
+		string filename = ss.str();
+		string filenameGT = ssgt.str();
+
+		src.copyTo(srcPre);
+		Mat src = imread(filename);
+		Mat srcGT = imread(filenameGT, 0);
+		threshold(srcGT, srcGT, 0, 255, CV_THRESH_BINARY | CV_THRESH_OTSU);
+
+		// Optical Flow
+		flowX = opticalflow.getOpticalFlowX(src, srcPre);
+		flowY = opticalflow.getOpticalFlowY(src, srcPre);
+
+		imshow("flowX", flowX);
+		imshow("flowY", flowY);
+
+		vector<Mat> images(3);
+		images.at(0) = flowX;			//for blue channel
+		images.at(1) = flowY;			//for green channel
+		images.at(2) = Mat::zeros(flowX.rows, flowX.cols, flowX.type());	//for red channel
+		Mat flowToKmeans;
+		merge(images, flowToKmeans);
+
+		// K-means
+		Mat srcK = flowToKmeans;
+		Mat samples(srcK.rows * srcK.cols, 3, CV_32F);
+		for (int y = 0; y < srcK.rows; y++)
+			for (int x = 0; x < srcK.cols; x++)
+				for (int z = 0; z < 3; z++)
+					samples.at<float>(y + x*srcK.rows, z) = srcK.at<Vec3b>(y, x)[z];
+
+		int clusterCount = 5;	// K
+		Mat labels;				// Input/output integer array that stores the cluster indices for every sample.
+		int attempts = 3;		// Iteration times
+		Mat centers;			// Output matrix of the cluster centers, one row per each cluster center.
+		kmeans(samples, clusterCount, labels, TermCriteria(CV_TERMCRIT_ITER | CV_TERMCRIT_EPS, 10000, 0.0001), attempts, KMEANS_PP_CENTERS, centers);
+
+		Mat new_image(srcK.size(), srcK.type());
+		for (int y = 0; y < srcK.rows; y++)
+		{
+			for (int x = 0; x < srcK.cols; x++)
+			{
+				int cluster_idx = labels.at<int>(y + x*srcK.rows, 0);
+				new_image.at<Vec3b>(y, x)[0] = centers.at<float>(cluster_idx, 0);
+				new_image.at<Vec3b>(y, x)[1] = centers.at<float>(cluster_idx, 1);
+				new_image.at<Vec3b>(y, x)[2] = centers.at<float>(cluster_idx, 2);
+			}
+		}
+		
+		imshow("clustered image", new_image);
+		waitKey(100);
+	}
+
+}
+
+// # 09251
+void readFonderFiles(){
+
+	char buf[256] = "C:\\Users\\sc\\Source\\Workspaces\\CV_SBE\\SBE\\Perception\\Bootstrap\\";
+
+	CStatDir statdir;
+	if (!statdir.SetInitDir(buf))
+	{
+		cout << "Error Path." << endl;
+		return;
+	}
+
+	statdir.BeginBrowse("*.bmp");
+	printf(" File Numbers: %d\n Fonder Numbers:%d\n", statdir.GetFileCount(), statdir.GetSubdirCount());
+
+	cout << statdir.FileNames.front() << endl;
+
+}
+
+// # 10201
+void testOrientation(){
+
+	vector<Mat> images;
+	getImages("Perception/WaterSurface/", &images);
+
+	// initial
+	Orientation ort;
+	int rs = images.front().rows;
+	int cs = images.front().cols;
+	ort.InitialOrientation(images.front());
+
+	// detect and update
+	for (vector<Mat>::iterator it = images.begin() + 1; it != images.end(); ++it){
+		Mat result = Mat::zeros(rs, cs, CV_8UC1);
+		ort.DetectOrientation(*it, result);
+		imshow("result",result);
+		waitKey(10);
+	}
+}
+
+int main()
+{
+	
+	testLBPMOGCompareGT();
+
+}
+

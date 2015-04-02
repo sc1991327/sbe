@@ -1,0 +1,204 @@
+﻿#include <opencv2/opencv.hpp>
+#include <opencv2/highgui/highgui.hpp>
+#include <opencv2/objdetect/objdetect.hpp>
+#include <opencv2/imgproc/imgproc.hpp>
+#include <opencv2/core/core.hpp>
+
+#include <iostream>  
+#include <stdio.h>
+#include <stdlib.h>
+#include <string>
+#include <math.h>
+#include <direct.h>
+#include <fstream>
+#include "ml.h"
+#include <utility>
+#include <list>
+#include <io.h>
+
+#include "EDGE.h"
+
+using namespace std;
+using namespace cv;
+
+cannyEdge::cannyEdge(Mat img, bool is_canny_cv, int canny_train_number){
+
+	width = img.cols;
+	height = img.rows;
+	cannyImg = img;
+	
+	trainNumber = 0;
+	CANNY_CV = is_canny_cv;
+	CANNY_TRAIN_NUMBER = canny_train_number;
+}
+
+cannyEdge::~cannyEdge(){
+
+}
+
+void cannyEdge::customCanny(Mat canny_img, Mat *canny_frame, int gsize){
+
+	Mat src = canny_img;
+
+	if ( gsize > 1 )
+	{
+		GaussianBlur(src, src, Size(gsize, gsize), 0, 0);
+	}
+
+	Mat src_gray;
+	src.copyTo(src_gray);
+	//cvtColor(src, src_gray, CV_RGB2GRAY);
+
+	Mat grad;
+	int ddepth = CV_32FC1;
+	int scale = 1;
+	int delta = 0;
+	Mat grad_x, grad_y;
+	Mat abs_grad_x, abs_grad_y;
+	// x
+	Sobel(src_gray, grad_x, ddepth, 1, 0, 3, scale, delta, BORDER_DEFAULT);
+	convertScaleAbs(grad_x, abs_grad_x);
+	// y
+	Sobel(src_gray, grad_y, ddepth, 0, 1, 3, scale, delta, BORDER_DEFAULT);
+	convertScaleAbs(grad_y, abs_grad_y);
+	// combine
+	addWeighted(abs_grad_x, 0.5, abs_grad_y, 0.5, 0, grad);
+
+	threshold(grad, grad, 0, 255, CV_THRESH_BINARY | CV_THRESH_OTSU);
+
+	*canny_frame = grad;
+
+}
+
+void cannyEdge::calcCannyFrame(Mat canny_img, Mat *canny_frame){
+
+	if (CANNY_CV == true)
+	{
+		Mat src_gray,dst;
+		canny_img.copyTo(src_gray);
+		//cvtColor(canny_img, src_gray, CV_BGR2GRAY);
+		//cvtColor(canny_img, dst, CV_BGR2GRAY);
+		Canny(src_gray, dst, 50, 150, 3);
+		*canny_frame = dst;
+	}
+	else
+	{
+		// input rgb image.
+		customCanny(canny_img, canny_frame, 0);
+	}
+
+}
+
+Mat cannyEdge::calcCannyBackground(vector<Mat>* canny_Background, int width, int height){
+
+	// store image
+	int bgnum = canny_Background->size();
+	
+	Mat background = Mat::zeros(height, width, CV_8UC1);
+
+	for (int bgn = 0; bgn < bgnum; bgn++)
+	{
+		addWeighted(background, bgn/bgnum, canny_Background->at(bgn), (1 - bgn/bgnum), 0.0, background);
+	}
+	Mat img_bw = background > 128;
+
+	return img_bw;
+
+}
+
+void cannyEdge::calcCannyForeground(Mat canny_img, Mat *canny_frame, Mat *canny_foreground){
+
+	calcCannyFrame(canny_img, canny_frame);
+
+	// canny train
+	trainNumber++;
+	// train
+	if (trainNumber < CANNY_TRAIN_NUMBER)
+	{
+		cannyBackground.push_back(*canny_frame);
+		*canny_foreground = Mat::zeros(height, width, CV_8UC1);
+	}
+	// detect
+	else
+	{
+		Mat bg = calcCannyBackground(&cannyBackground, width, height);
+		subtract(*canny_frame, bg, *canny_foreground);
+	}
+
+}
+
+// -----------------------------------------------------------------------------------
+// OUTPUT METHODS
+
+void cannyEdge::setCannyImg(Mat canny_img){
+
+	cannyImg = canny_img;
+
+}
+
+// not test!!!
+void cannyEdge::updateCannyBackground(Mat canny_img){
+
+	// get edge image
+	Mat src;
+	cvtColor(canny_img, src, CV_BGR2GRAY);
+	calcCannyFrame(canny_img, &src);
+
+	// add end
+	cannyBackground.push_back(src);
+
+	// delete first
+	cannyBackground.erase(cannyBackground.begin());
+}
+
+Mat cannyEdge::getCannyImg(){
+
+	return cannyImg;
+}
+
+Mat cannyEdge::getCannyFrame(){
+
+	calcCannyFrame(cannyImg, &cannyFrame);
+
+	return cannyFrame;
+
+}
+
+Mat cannyEdge::getCannyForeground(){
+
+	calcCannyForeground(cannyImg, &cannyFrame, &cannyForeground);
+
+	return cannyForeground;
+
+}
+
+// -----------------------------------------------------------------------------------
+// independent
+
+Mat cannyEdge::getCannyOriginalData(Mat canny_img){
+
+	Mat src = canny_img;
+
+	GaussianBlur(src, src, Size(5, 5), 0, 0);
+
+	Mat src_gray;
+	cvtColor(src, src_gray, CV_RGB2GRAY);
+
+	Mat grad;
+	int ddepth = CV_32FC1;
+	int scale = 1;
+	int delta = 0;
+	Mat grad_x, grad_y;
+	Mat abs_grad_x, abs_grad_y;
+	// x
+	Sobel(src_gray, grad_x, ddepth, 1, 0, 3, scale, delta, BORDER_DEFAULT);
+	convertScaleAbs(grad_x, abs_grad_x);
+	// y
+	Sobel(src_gray, grad_y, ddepth, 0, 1, 3, scale, delta, BORDER_DEFAULT);
+	convertScaleAbs(grad_y, abs_grad_y);
+	// combine
+	addWeighted(abs_grad_x, 0.5, abs_grad_y, 0.5, 0, grad);
+
+	return grad;
+
+}

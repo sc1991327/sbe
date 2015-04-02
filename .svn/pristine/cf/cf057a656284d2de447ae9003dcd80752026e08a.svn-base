@@ -1,0 +1,539 @@
+#include "Orientation.h"
+#include <math.h>
+
+Orientation::Orientation()
+{
+}
+
+Orientation::~Orientation()
+{
+}
+
+int Orientation::InitialOrientation(Mat &image){
+
+	float m;
+	mainOrt o;
+
+	// get all pixel's orientations -> size(h-1,w-1)
+	vector<mainOrt>	OrtMain;
+	vector<float>	OrtData;
+	calcOrientation(image, OrtMain, OrtData); // size: (w-2)*(h-2)
+
+	// window to find the main orientation for each pixel.
+	int heigh = image.rows - 2;
+	int width = image.cols - 2;
+	calcMainOrientation(&OrtMain, &OrtData, OrtPixel, width, heigh);
+
+	return 0;
+}
+
+int Orientation::DetectOrientation(Mat &image, Mat &result){
+
+	float m;
+	mainOrt o;
+
+	// get all pixel's orientations
+	vector<mainOrt>	OrtMain;
+	vector<float>	OrtData;
+	calcOrientation(image, OrtMain, OrtData); // size: (w-2)*(h-2)
+
+	// get Orientations
+	int heigh = image.rows - 2;
+	int width = image.cols - 2;
+	vector<pixelOrient> imgorients;
+	calcMainOrientation(&OrtMain, &OrtData, imgorients, width, heigh);
+	
+	// compare
+	for (int i = 0; i < imgorients.size(); i++)
+	{
+		// all can use condition
+		bool thsMain = (abs((imgorients[i].ortMain) - (OrtPixel[i].ortMain))) < 2 || (abs((imgorients[i].ortMain) - (OrtPixel[i].ortMain))) == 7; // 0-7
+		bool thsData = abs(imgorients[i].ortData - OrtPixel[i].ortData) < THRESHOLD_ORTDATA;
+		
+		bool thsVrtCorr = abs(correlection(imgorients[i].ortVrt, OrtPixel[i].ortVrt)) > THERSHOLD_ORTVRT_CORR;
+		bool thsVrtAvg = abs(absDiffAvg(imgorients[i].ortVrt, OrtPixel[i].ortVrt)) < THERSHOLD_ORTVRT_AVG;
+
+		bool thsLevelVrtAvg = abs(absDiffAvg(imgorients[i].ortLevelVrt, OrtPixel[i].ortLevelVrt)) < THERSHOLD_LEVEL_VRT4_AVG;
+		bool thsLevelVrtCorr = abs(correlection(imgorients[i].ortLevelVrt, OrtPixel[i].ortLevelVrt)) > THERSHOLD_LEVEL_VRT4_CORR;
+
+		bool thsLevelOrtCorr = ortCorrelection(imgorients[i].ortLevelOrt, OrtPixel[i].ortLevelOrt) > THERSHOLD_LEVEL_ORT_CORR;
+
+		if (thsVrtCorr)
+		{
+			// is background
+			pushOrientation(imgorients[i], OrtPixel, i);
+		}
+		else
+		{
+			// is not background
+			int r = i / width;
+			int c = i % width;
+			result.at<uchar>((r + 1)*(width+2) + (c + 1)) = 255;
+		}
+	}
+
+	return 0;
+}
+
+// ---------- private methods ----------------
+
+void Orientation::pushOrientation(pixelOrient &pixelort, vector<pixelOrient> &OrtPixel, int pos){
+	
+	OrtPixel[pos].ortData = 0.4 * OrtPixel[pos].ortData + 0.1 * pixelort.ortData;
+	
+	for (int i = 0; i < 8; i++)
+	{
+		OrtPixel[pos].ortNum[i] += pixelort.ortNum[i];
+	}
+	for (int i = 0; i < ((2 * ORTWINDOWSIZE + 1) * (2 * ORTWINDOWSIZE + 1)); i++)
+	{
+		OrtPixel[pos].ortVrt[i] = 0.4 * OrtPixel[pos].ortVrt[i] + 0.1 * pixelort.ortVrt[i];
+	}
+
+	// level
+	for (int n = 0; n < 4;n++)
+	{
+		OrtPixel[pos].ortLevelVrt[n] = 0.4 * OrtPixel[pos].ortLevelVrt[n] + 0.1 * pixelort.ortLevelVrt[n];
+		for (int i = 0; i < 8; i++)
+		{
+			OrtPixel[pos].ortLevelOrtData[n][i] += pixelort.ortLevelOrtData[n][i];
+		}
+		for (int i = 0; i < ((ORTWINDOWSIZE + 1) * (ORTWINDOWSIZE + 1)); i++)
+		{
+			OrtPixel[pos].ortLevelVrtData[n][i] = 0.4 * OrtPixel[pos].ortLevelVrtData[n][i] + 0.1 * pixelort.ortLevelVrtData[n][i];
+		}
+	}
+
+}
+
+void Orientation::calcMainOrientation(vector<mainOrt> *OrtMain, vector<float> *OrtData, vector<pixelOrient> &OrtPixel, int width, int heigh){
+
+	int num = 0;
+	for (vector<float>::iterator it = OrtData->begin(); it < OrtData->end(); it++){
+
+		int i = num / width;
+		int j = num % width;
+
+		pixelOrient po;
+		po.ortData = *it;													// set po.ortData
+		distMainOrientation(OrtMain, OrtData, width, heigh, i, j, po);		// set po.ortNum, po.ortVrt, po.ortLevelOrtData, po.ortLevelVrtData
+		collMainOrientation(po);											// set po.ortMain, po.ortLevelOrt, po.ortLevelVrt
+
+		OrtPixel.push_back(po);
+
+		num++;
+	}
+
+}
+
+// calculate pixelOrient.ortMain
+void Orientation::collMainOrientation(pixelOrient &po){
+
+	// ortmain
+	int eidx = 0;
+	int emax = po.ortNum[eidx];
+	for (int i = 1; i < 8; i++)
+	{
+		if ( po.ortNum[i] > emax )
+		{
+			emax = po.ortNum[i];
+			eidx = i;
+		}
+	}
+	po.ortMain = (mainOrt)eidx;
+
+	for (int n = 0; n < 4; n++)
+	{
+		// level ort
+		int eidx = 0;
+		int emax = po.ortLevelOrtData[n][eidx];
+		for (int i = 0; i < 8; i++)
+		{
+			if (po.ortLevelOrtData[n][i] > emax)
+			{
+				emax = po.ortLevelOrtData[n][i];
+				eidx = i;
+			}
+		}
+		po.ortLevelOrt[n] = (mainOrt)eidx;
+
+		// level vrt
+		float lavg = 0;
+		for (int i = 0; i < ((ORTWINDOWSIZE + 1) * (ORTWINDOWSIZE + 1)); i++)
+		{
+			lavg += po.ortLevelVrtData[n][i];
+		}
+		po.ortLevelVrt[n] = lavg / ((ORTWINDOWSIZE + 1) * (ORTWINDOWSIZE + 1));
+
+	}
+	
+}
+
+// calculate pixelOrient.ortNum
+void Orientation::distMainOrientation(vector<mainOrt> *OrtMain, vector<float> *OrtData, int width, int heigh, int i, int j, pixelOrient &po){
+
+	int wsize = ORTWINDOWSIZE;
+
+	// initial
+	for (int x = 0; x < 8; x++)
+	{
+		po.ortNum[x] = 0;
+	}
+	for (int x = 0; x < (2 * wsize + 1) * (2 * wsize + 1); x++)
+	{
+		po.ortVrt[x] = 0;
+	}
+	for (int x = 0; x < 4; x++)
+	{
+		po.ortLevelOrt[x] = (mainOrt)0;
+		po.ortLevelVrt[x] = 0;
+	}
+	for (int z = 0; z < 4; z++)
+	{
+		for (int x = 0; x < 8; x++)
+		{
+			po.ortLevelOrtData[z][x] = 0;
+		}
+		for (int x = 0; x < (wsize + 1) * (wsize + 1); x++)
+		{
+			po.ortLevelVrtData[z][x] = 0;
+		}
+	}
+
+	// distribute
+	// for n*n
+	if (i - wsize >= 0 && i + wsize < heigh && j - wsize >= 0 && j + wsize < width)
+	{
+		// store all n around data
+		for (int ti = -wsize; ti <= wsize; ti++)
+		{
+			for (int tj = -wsize; tj <= wsize; tj++)
+			{
+				// for ortNum
+				po.ortNum[OrtMain->at((i + ti)*width + j + tj)]++;
+
+				// for ortOrt, ortVrt
+				po.ortVrt[(ti + wsize)*(2 * wsize + 1) + (tj + wsize)] = OrtData->at((i + ti)*width + j + tj);
+
+				// for ortLevelOrt, ortLevelVrt
+				if ( ti <=0 && tj <=0 )
+				{
+					po.ortLevelOrtData[0][OrtMain->at((i + ti)*width + j + tj)]++;
+					po.ortLevelVrtData[0][(ti + wsize)*(wsize + 1) + (tj + wsize)] = OrtData->at((i + ti)*width + j + tj);
+				}
+				else if ( ti <= 0 && tj >=0 )
+				{
+					po.ortLevelOrtData[1][OrtMain->at((i + ti)*width + j + tj)]++;
+					po.ortLevelVrtData[1][(ti + wsize)*(wsize + 1) + tj] = OrtData->at((i + ti)*width + j + tj);
+				}
+				else if ( ti >=0 && tj >=0 )
+				{
+					po.ortLevelOrtData[2][OrtMain->at((i + ti)*width + j + tj)]++;
+					po.ortLevelVrtData[2][ti*(wsize + 1) + tj] = OrtData->at((i + ti)*width + j + tj);
+				}
+				else
+				{
+					po.ortLevelOrtData[3][OrtMain->at((i + ti)*width + j + tj)]++;
+					po.ortLevelVrtData[3][ti*(wsize + 1) + (tj + wsize)] = OrtData->at((i + ti)*width + j + tj);
+				}
+			}
+		}
+		// collect level
+
+
+	}
+
+	// for fast 3*3
+	/*if (i > 0 && i < heigh - 1 && j > 0 && j < width - 1)
+	{
+	po.ortNum[OrtMain->at((i - 1)*width + j - 1)]++;
+	po.ortNum[OrtMain->at((i - 1)*width + j)]++;
+	po.ortNum[OrtMain->at((i - 1)*width + j + 1)]++;
+	po.ortNum[OrtMain->at(i*width + j - 1)]++;
+	po.ortNum[OrtMain->at(i*width + j)]++;
+	po.ortNum[OrtMain->at(i*width + j + 1)]++;
+	po.ortNum[OrtMain->at((i + 1)*width + j - 1)]++;
+	po.ortNum[OrtMain->at((i + 1)*width + j)]++;
+	po.ortNum[OrtMain->at((i + 1)*width + j + 1)]++;
+	}
+	else
+	{
+	if ( i == 0 )
+	{
+	if ( j == 0 )
+	{
+	po.ortNum[OrtMain->at(i*width + j)]++;
+	po.ortNum[OrtMain->at(i*width + j + 1)]++;
+	po.ortNum[OrtMain->at((i + 1)*width + j)]++;
+	po.ortNum[OrtMain->at((i + 1)*width + j + 1)]++;
+	}
+	else if ( j == width - 1 )
+	{
+	po.ortNum[OrtMain->at(i*width + j - 1)]++;
+	po.ortNum[OrtMain->at(i*width + j)]++;
+	po.ortNum[OrtMain->at((i + 1)*width + j - 1)]++;
+	po.ortNum[OrtMain->at((i + 1)*width + j)]++;
+	}
+	else
+	{
+	po.ortNum[OrtMain->at(i*width + j - 1)]++;
+	po.ortNum[OrtMain->at(i*width + j)]++;
+	po.ortNum[OrtMain->at(i*width + j + 1)]++;
+	po.ortNum[OrtMain->at((i + 1)*width + j - 1)]++;
+	po.ortNum[OrtMain->at((i + 1)*width + j)]++;
+	po.ortNum[OrtMain->at((i + 1)*width + j + 1)]++;
+	}
+
+	}
+	else if ( i == heigh - 1 )
+	{
+	if ( j == 0 )
+	{
+	po.ortNum[OrtMain->at((i - 1)*width + j)]++;
+	po.ortNum[OrtMain->at((i - 1)*width + j + 1)]++;
+	po.ortNum[OrtMain->at(i*width + j)]++;
+	po.ortNum[OrtMain->at(i*width + j + 1)]++;
+	}
+	else if ( j == width - 1 )
+	{
+	po.ortNum[OrtMain->at((i - 1)*width + j - 1)]++;
+	po.ortNum[OrtMain->at((i - 1)*width + j)]++;
+	po.ortNum[OrtMain->at(i*width + j - 1)]++;
+	po.ortNum[OrtMain->at(i*width + j)]++;
+	}
+	else
+	{
+	po.ortNum[OrtMain->at((i - 1)*width + j - 1)]++;
+	po.ortNum[OrtMain->at((i - 1)*width + j)]++;
+	po.ortNum[OrtMain->at((i - 1)*width + j + 1)]++;
+	po.ortNum[OrtMain->at(i*width + j - 1)]++;
+	po.ortNum[OrtMain->at(i*width + j)]++;
+	po.ortNum[OrtMain->at(i*width + j + 1)]++;
+	}
+	}
+	else
+	{
+	if ( j == 0 )
+	{
+	po.ortNum[OrtMain->at((i - 1)*width + j)]++;
+	po.ortNum[OrtMain->at((i - 1)*width + j + 1)]++;
+	po.ortNum[OrtMain->at(i*width + j)]++;
+	po.ortNum[OrtMain->at(i*width + j + 1)]++;
+	po.ortNum[OrtMain->at((i + 1)*width + j)]++;
+	po.ortNum[OrtMain->at((i + 1)*width + j + 1)]++;
+	}
+	else
+	{
+	po.ortNum[OrtMain->at((i - 1)*width + j - 1)]++;
+	po.ortNum[OrtMain->at((i - 1)*width + j)]++;
+	po.ortNum[OrtMain->at(i*width + j - 1)]++;
+	po.ortNum[OrtMain->at(i*width + j)]++;
+	po.ortNum[OrtMain->at((i + 1)*width + j - 1)]++;
+	po.ortNum[OrtMain->at((i + 1)*width + j)]++;
+	}
+	}
+	}*/
+
+}
+
+void Orientation::calcOrientation(Mat &imagein, vector<mainOrt> &OrtMain, vector<float> &OrtData){
+
+	Mat image;
+	cvtColor(imagein, image, CV_BGR2GRAY);
+
+	int rs = image.rows;
+	int cs = image.cols;
+
+	for ( int r = 1; r < rs - 1; r++ )
+	{
+		for ( int c = 1; c < cs - 1; c++ )
+		{
+			int i_me = (int)image.at<uchar>(r,c);
+			int i_up = (int)image.at<uchar>(r + 1, c);
+			int i_down = (int)image.at<uchar>(r - 1, c);
+			int i_left = (int)image.at<uchar>(r, c - 1);
+			int i_right = (int)image.at<uchar>(r, c + 1);
+			float m;
+			mainOrt o;
+			calcPixelOrientation(i_me, i_up, i_down, i_left, i_right, m, o);
+			OrtData.push_back(m);	// store m
+			OrtMain.push_back(o);	// store main orientation
+		}
+	}
+
+}
+
+void Orientation::calcPixelOrientation(int i_me, int i_up, int i_down, int i_left, int i_right, float &m, mainOrt &o){
+
+	float pi = 3.1416;
+
+	int vertical = i_down - i_up;
+	int horizontal = i_right - i_left;
+
+	m = sqrt( horizontal*horizontal + vertical*vertical );
+	float theta;
+
+	if ( horizontal == 0 )
+	{
+		if ( vertical > 0 )
+		{
+			o = o_up;
+		} 
+		else
+		{
+			o = o_down;
+		}
+		return;
+	}
+	else{
+		theta = atan(vertical / horizontal);
+	}
+
+	if ( abs(theta) > pi/3 )
+	{
+		if ( vertical > 0 )
+		{
+			o = o_up;
+		}
+		else
+		{
+			o = o_down;
+		}
+	}
+	else if ( abs(theta) < pi / 6)
+	{
+		if (horizontal > 0)
+		{
+			o = o_left;
+		}
+		else
+		{
+			o = o_right;
+		}
+	}
+	else
+	{
+		if ( vertical > 0 )
+		{
+			if ( horizontal > 0 )
+			{
+				o = o_up_left;
+			}
+			else
+			{
+				o = o_up_right;
+			}
+		}
+		else
+		{
+			if (horizontal > 0)
+			{
+				o = o_down_left;
+			}
+			else
+			{
+				o = o_down_right;
+			}
+		}
+	}
+
+}
+
+float Orientation::correlection(float *array1, float *array2){
+
+	int asize = sizeof(array1);
+	if (asize < 2)
+	{
+		return -2;
+	}
+	if (asize != sizeof(array2))
+	{
+		return -3;
+	}
+
+	float ldsumavg_1 = 0;
+	float ldsumavg_2 = 0;
+	float ldmuT = 0;
+	float ldDev_1 = 0;
+	float ldDev_2 = 0;
+	float ldRo_1 = 0;
+	float ldRo_2 = 0;
+
+	// get avg
+	for (int i = 0; i < asize; i++){
+		ldsumavg_1 += array1[i];
+		ldsumavg_2 += array2[i];
+	}
+	ldsumavg_1 /= asize;
+	ldsumavg_2 /= asize;
+
+	// get dev
+	for (int i = 0; i < asize; i++){
+		ldDev_1 = array1[i] - ldsumavg_1;
+		ldDev_2 = array2[i] - ldsumavg_2;
+		ldmuT += ldDev_1*ldDev_2;
+		ldRo_1 += ldDev_1 * ldDev_1;
+		ldRo_2 += ldDev_2 * ldDev_2;
+	}
+
+	float ldDivider = sqrt(ldRo_1)*sqrt(ldRo_2);
+	if (ldDivider == 0){
+		return -4;
+	}
+
+	return(ldmuT / ldDivider);
+
+}
+
+float Orientation::absDiffAvg(float *array1, float *array2){
+
+	int asize = sizeof(array1);
+	if (asize < 2)
+	{
+		return -2;
+	}
+	if (asize != sizeof(array2))
+	{
+		return -3;
+	}
+
+	float ldsumavg_1 = 0;
+	float ldsumavg_2 = 0;
+
+	// get avg
+	for (int i = 0; i < asize; i++){
+		ldsumavg_1 += array1[i];
+		ldsumavg_2 += array2[i];
+	}
+	ldsumavg_1 /= asize;
+	ldsumavg_2 /= asize;
+
+	return abs(ldsumavg_1 - ldsumavg_2);
+
+}
+
+float Orientation::ortCorrelection(mainOrt *array1, mainOrt *array2){
+
+	int asize = sizeof(array1);
+	if (asize < 2)
+	{
+		return -2;
+	}
+	if (asize != sizeof(array2))
+	{
+		return -3;
+	}
+
+	int corr = 0;
+
+	// get avg
+	for (int i = 0; i < asize; i++){
+		if (abs(array1[i] - array2[i]) < 2 || abs(array1[i] - array2[i]) == 7 )
+		{
+			corr++;
+		}
+	}
+
+	return corr / asize;
+
+}

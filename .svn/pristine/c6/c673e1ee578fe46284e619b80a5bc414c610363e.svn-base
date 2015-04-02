@@ -1,0 +1,1129 @@
+﻿#include <opencv2/opencv.hpp>
+#include <opencv2/highgui/highgui.hpp>
+#include <opencv2/objdetect/objdetect.hpp>
+#include <opencv2/imgproc/imgproc.hpp>
+#include <opencv2/core/core.hpp>
+
+#include <iostream>  
+#include <stdio.h>
+#include <stdlib.h>
+#include <string>
+#include <math.h>
+#include <direct.h>
+#include <fstream>
+#include "ml.h"
+#include <utility>
+#include <list>
+#include <io.h>
+
+#include "SBE.h"
+
+// THRESHOLD
+#define RANDPROBABILITY		5	// rand update frequency control
+
+// Use to code control of record result
+// [ only can use one!!! ]
+//#define RECORD_CODEBOOK_RESULT					// record the result of codebook or not
+#define RECORD_CODEBOOK_CANNY_RESULT			// record the result of canny codebook or not
+
+static bool CANNY_CV = false;				// use cvcanny or customcanny
+
+using namespace std;
+using namespace cv;
+
+int cannytrainframe = 0;
+
+// 随机
+RNG rnd = theRNG();
+int rndn[rndSize];
+int rnd8[rndSize];
+int rdx = 0;
+
+// ---------------------------
+// define vibook
+
+vibook::vibook( int img_w, int img_h )
+{
+    /* default parameter */ 
+	param.train_num		= 1;		//training frame number, we only need one
+	param.alpha			= 0.5;		//0.5 bright 0.4~0.7
+	param.beta			= 1.1;		//1.1 bright 1.1~1.5
+	param.epsilon1		= 15;		//training threshold
+	param.epsilon2		= 10;		//detection threshold
+	param.epsilon3		= 20;		//compare backgroundmodel threshold
+	param.t_delete		= 1000;			
+	
+	frame_num			= 0;
+
+	cannydenominator	= 20;
+	cannynumerator		= 12;
+
+	backgroundwidth		= img_w + 2;
+	backgroundheight	= img_h + 2;
+	imagepixelnumber	= img_w * img_h;
+
+	// initial random
+	for(int i=0;i<rndSize;i++)
+    {
+        rndn[i]=rnd(RANDPROBABILITY);
+        rnd8[i]=rnd(8);
+    }
+
+	// initial bg_model = (( width + 2 ) * ( height + 2 )) [ So : edge is not have data! ]
+	for( int i = 0; i < (img_w+2) * (img_h+2); i++ ) 
+	{
+		bg_model.push_back( vector< viword >() );
+	}
+	
+	// initial canny_model = width * height
+	for( int j = 0; j < img_w * img_h; j++ )
+	{
+		canny_model.push_back( vector< canny >() );
+	}
+	
+	cannybackground = cvCreateImage(cvSize(img_w, img_h), IPL_DEPTH_8U, 1);
+	cannyforeground = cvCreateImage(cvSize(img_w, img_h), IPL_DEPTH_8U, 1);
+	cannyframe = cvCreateImage(cvSize(img_w, img_h), IPL_DEPTH_8U, 1);
+
+	// create result images
+	codebookResult = cvCreateImage(cvSize(img_w, img_h), 8, 1);
+	cannycodebookResult = cvCreateImage( cvSize( img_w, img_h ), 8, 1 );
+	
+ }
+
+vibook::~vibook()
+{
+	cvReleaseImage(&cannybackground);
+	cvReleaseImage(&cannyforeground);
+	cvReleaseImage(&cannyframe);
+
+	cvReleaseImage(&codebookResult);
+	cvReleaseImage(&cannycodebookResult);
+
+	bg_model.clear();
+	vector<vector< viword >>().swap(bg_model);
+
+	canny_model.clear();
+	vector<vector< canny >>().swap(canny_model);
+}
+
+// input frame : gray image
+// output edgeframe : 
+void vibook::customcanny(IplImage *frame, IplImage *edgeframe, int gsize){
+
+	Mat src = Mat(frame);
+	GaussianBlur(src, src, Size(gsize, gsize), 0, 0);
+
+	Mat src_gray;
+	cvtColor(src, src_gray, CV_RGB2GRAY);
+
+	Mat grad;
+	int ddepth = CV_32FC1;
+	int scale = 1;
+	int delta = 0;
+	Mat grad_x, grad_y;
+	Mat abs_grad_x, abs_grad_y;
+	// x
+	Sobel(src_gray, grad_x, ddepth, 1, 0, 3, scale, delta, BORDER_DEFAULT);
+	convertScaleAbs(grad_x, abs_grad_x);
+	// y
+	Sobel(src_gray, grad_y, ddepth, 0, 1, 3, scale, delta, BORDER_DEFAULT);
+	convertScaleAbs(grad_y, abs_grad_y);
+	// combine
+	addWeighted(abs_grad_x, 0.5, abs_grad_y, 0.5, 0, grad);
+
+	threshold(grad, grad, 0, 255, CV_THRESH_BINARY | CV_THRESH_OTSU);
+	
+	edgeframe = new IplImage(grad);
+
+	cvSaveImage("temp.jpg", edgeframe);
+
+}
+
+// push_back codeword to bg_model
+// x,y : input pixel position
+// pixel : output to bg_model position
+void vibook::pushviword(vector < vector< viword > > &bg_model, IplImage *img, int pixel, int x, int y)
+{
+	int i = x * img->widthStep + 3 * y; // pos by bytes
+	// get RGB data.
+	CvScalar xt = cvScalar(
+		(unsigned char)img->imageData[i + 2],
+		(unsigned char)img->imageData[i + 1],
+		(unsigned char)img->imageData[i + 0],
+		0);
+	// calculate brightness.
+	double vec_i = sqrt(xt.val[0] * xt.val[0] + xt.val[1] * xt.val[1] + xt.val[2] * xt.val[2]);
+
+	viword viword;
+	// store rgb
+	viword.vm = cvScalar(xt.val[0], xt.val[1], xt.val[2], 0);
+	// store aux
+	viword.aux.i_min = vec_i;
+	viword.aux.i_max = vec_i;
+	viword.aux.f = 1;
+	viword.aux.lamda = 0;
+	viword.aux.p = frame_num;
+	viword.aux.q = frame_num;
+
+	bg_model[pixel].push_back(viword);
+
+}
+
+bool vibook::checkbrightness(double &i_one, double &i_two)
+{
+	if ((i_one - i_two) < 70)
+		return true;
+	else
+		return false;
+}
+
+double vibook::colordis(CvScalar &xt, CvScalar &vm)
+{
+	double xm_dot_vm_pow = pow(xt.val[0] * vm.val[0] + xt.val[1] * vm.val[1] + xt.val[2] * vm.val[2], 2);
+	double vm_pow = (vm.val[0] * vm.val[0] + vm.val[1] * vm.val[1] + vm.val[2] * vm.val[2]);
+	double xt_pow = (xt.val[0] * xt.val[0] + xt.val[1] * xt.val[1] + xt.val[2] * xt.val[2]);
+	double p_pow;
+
+	if (xm_dot_vm_pow == 0)
+		p_pow = (xm_dot_vm_pow + 0.001) / (vm_pow + 0.001);
+	else
+		p_pow = xm_dot_vm_pow / vm_pow;
+
+	return sqrt(abs(xt_pow - p_pow));
+}
+
+bool vibook::brightness(double i, double i_min, double i_max)	//«G«×¤ñ¸û
+{
+	double i_low = param.alpha * i_max;
+	double i_up = min(param.beta * i_max, i_min / param.alpha);
+
+	if (i_low <= i && i <= i_up)
+		return true;
+	else
+		return false;
+}
+
+void vibook::calccannyframe(IplImage *frame, IplImage *canny_frame){
+
+	if (CANNY_CV == true)
+	{
+		cvCvtColor(frame, canny_frame, CV_BGR2GRAY);
+		cvCanny(canny_frame, canny_frame, 50, 150, 3);
+	}
+	else
+	{
+		// input rgb image.
+		customcanny(frame, canny_frame, 5);
+		canny_frame = cvLoadImage("temp.jpg", 0); //0 : get gray image
+	}
+
+}
+
+/* Initial canny_model */
+// method : calculate canny map --> create canny_model.
+void vibook::initial_canny_model(IplImage *cannyimg){
+
+	cannytrainframe = 0;
+
+	if (CANNY_CV == true)
+	{
+		cvCvtColor(cannyimg, cannyframe, CV_BGR2GRAY);
+		cvCanny(cannyframe, cannyframe, 50, 150, 3);
+	}
+	else
+	{
+		// input rgb image.
+		customcanny(cannyimg, cannyframe, 5);
+		cannyframe = cvLoadImage("temp.jpg", 0); //0 : get gray image
+	}
+
+	// initial canny_model
+	for (int x = 0; x < cannybackground->height; x++)
+	{
+		for (int y = 0; y < cannybackground->width; y++)
+		{
+			// widthStep : The size of an aligned image row, in bytes.
+			// width : Image width in pixels
+			int i = x * cannybackground->widthStep + y;			// pos by bytes
+			int cannypixel = x * cannybackground->width + y;	// pos by pixels
+
+			// imageData : A pointer to the aligned image data.
+			CvScalar xt = cvScalar(
+				(unsigned char)cannybackground->imageData[i + 0],
+				(unsigned char)cannybackground->imageData[i + 1],
+				(unsigned char)cannybackground->imageData[i + 2],
+				0);
+
+			if (xt.val[0] == 0)
+			{
+				// is not edge
+				canny canny;
+				canny.cannyvalue = 0;
+				canny_model[cannypixel].push_back(canny);
+			}
+			else
+			{
+				// is edge
+				canny canny;
+				canny.cannyvalue = 1;
+				canny_model[cannypixel].push_back(canny);
+			}
+		}
+	}
+}
+
+/* Initial bg_model */
+// method : the algorithm 1 in paper.
+void vibook::initial_bg_model(IplImage *img){
+	for (int x = 0; x < img->height; x++)
+	{
+		for (int y = 0; y < img->width; y++)
+		{
+			// bg_model 里面应该存储的位置，问题是下面的公式是为什么？？？？？？
+			int pixel = ((x + 1) * ((img->width) + 2)) + y + 1;
+
+			// It's not beside the edge, neighbor is complete. 
+			if ((x != 0) && (x != ((img->height) - 1)) && (y != 0) && (y != ((img->width) - 1)))
+			{
+				pushviword(bg_model, img, pixel, x, y);
+				pushviword(bg_model, img, pixel, x - 1, y - 1);
+				pushviword(bg_model, img, pixel, x - 1, y);
+				pushviword(bg_model, img, pixel, x - 1, y + 1);
+				pushviword(bg_model, img, pixel, x, y + 1);
+				pushviword(bg_model, img, pixel, x + 1, y + 1);
+				pushviword(bg_model, img, pixel, x + 1, y);
+				pushviword(bg_model, img, pixel, x + 1, y - 1);
+				pushviword(bg_model, img, pixel, x, y - 1);
+			}
+			else
+			{
+				if (x == 0)
+				{
+					// by the top edge
+					if ((y != 0) && (y != img->width - 1))
+					{
+						pushviword(bg_model, img, pixel, x, y);
+						pushviword(bg_model, img, pixel, x, y + 1);
+						pushviword(bg_model, img, pixel, x + 1, y + 1);
+						pushviword(bg_model, img, pixel, x + 1, y);
+						pushviword(bg_model, img, pixel, x + 1, y - 1);
+						pushviword(bg_model, img, pixel, x, y - 1);
+					}
+					else
+					{
+						// left-top corner
+						if (y == 0)
+						{
+							pushviword(bg_model, img, pixel, x, y);
+							pushviword(bg_model, img, pixel, x, y + 1);
+							pushviword(bg_model, img, pixel, x + 1, y + 1);
+							pushviword(bg_model, img, pixel, x + 1, y);
+						}
+						// right-top corner
+						else
+						{
+							pushviword(bg_model, img, pixel, x, y);
+							pushviword(bg_model, img, pixel, x + 1, y);
+							pushviword(bg_model, img, pixel, x + 1, y - 1);
+							pushviword(bg_model, img, pixel, x, y - 1);
+						}
+					}
+				}
+				else
+				{
+					if (x == ((img->height) - 1))
+					{
+						// by the bottom edge
+						if ((y != 0) && (y != img->width - 1))
+						{
+							pushviword(bg_model, img, pixel, x, y);
+							pushviword(bg_model, img, pixel, x, y - 1);
+							pushviword(bg_model, img, pixel, x - 1, y - 1);
+							pushviword(bg_model, img, pixel, x - 1, y);
+							pushviword(bg_model, img, pixel, x - 1, y + 1);
+							pushviword(bg_model, img, pixel, x, y + 1);
+						}
+						else
+						{
+							// left-bottom corner
+							if (y == 0)
+							{
+								pushviword(bg_model, img, pixel, x, y);
+								pushviword(bg_model, img, pixel, x - 1, y);
+								pushviword(bg_model, img, pixel, x - 1, y + 1);
+								pushviword(bg_model, img, pixel, x, y + 1);
+							}
+							// right-bottom corner
+							else
+							{
+								pushviword(bg_model, img, pixel, x, y);
+								pushviword(bg_model, img, pixel, x, y - 1);
+								pushviword(bg_model, img, pixel, x - 1, y - 1);
+								pushviword(bg_model, img, pixel, x - 1, y);
+							}
+						}
+					}
+					else
+					{
+						// left edge
+						if (y == 0)
+						{
+							pushviword(bg_model, img, pixel, x, y);
+							pushviword(bg_model, img, pixel, x - 1, y);
+							pushviword(bg_model, img, pixel, x - 1, y + 1);
+							pushviword(bg_model, img, pixel, x, y + 1);
+							pushviword(bg_model, img, pixel, x + 1, y + 1);
+							pushviword(bg_model, img, pixel, x + 1, y);
+						}
+						else
+						{
+							pushviword(bg_model, img, pixel, x, y);
+							pushviword(bg_model, img, pixel, x + 1, y);
+							pushviword(bg_model, img, pixel, x + 1, y - 1);
+							pushviword(bg_model, img, pixel, x, y - 1);
+							pushviword(bg_model, img, pixel, x - 1, y - 1);
+							pushviword(bg_model, img, pixel, x - 1, y);
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// for each codeword.
+	for (int i = 0; i < bg_model.size(); i++)
+	{
+		// for each codeword parameter.
+		for (int j = 0; j < bg_model[i].size(); j++)
+		{
+			// Initial codeword by using the same pixel's multi-codeword data
+			for (vector< viword >::iterator iter = bg_model[i].begin() + (j + 1); iter != bg_model[i].end();)
+			{
+				if ((colordis(bg_model[i][j].vm, iter->vm) < param.epsilon1) && checkbrightness(bg_model[i][j].aux.i_min, iter->aux.i_min) && checkbrightness(bg_model[i][j].aux.i_max, iter->aux.i_max))
+				{
+					bg_model[i][j].vm = cvScalar(
+						(bg_model[i][j].vm.val[0] + iter->vm.val[0]) / 2,
+						(bg_model[i][j].vm.val[1] + iter->vm.val[1]) / 2,
+						(bg_model[i][j].vm.val[2] + iter->vm.val[2]) / 2,
+						0);
+
+					bg_model[i][j].aux.i_min = min(bg_model[i][j].aux.i_min, iter->aux.i_min);
+					bg_model[i][j].aux.i_max = max(bg_model[i][j].aux.i_max, iter->aux.i_max);
+					vector<viword>::iterator temp;
+					temp = bg_model[i].erase(iter);
+					iter = temp;
+				}
+				else
+					iter++;
+			}
+		}
+	}
+}
+
+// ------ public to initial background ------
+void vibook::InitialBackground( IplImage *img ,IplImage *cannyimg)
+{
+
+	cout << "Begin initial canny_model...";
+	initial_canny_model(cannyimg);
+	cout << "done." << endl;
+
+	cout << "Begin initial bg_model...";
+	float TimeA = getTickCount();
+	initial_bg_model(img);
+	float TimeB = getTickCount();
+	cout << "done" << endl;
+	cout << " Initial Clock Cycles: " << (TimeB - TimeA) / getTickFrequency() << endl;
+
+}
+
+/* Update canny_model */
+// output : canny foreground image.
+void vibook::update_canny_model(IplImage *cannyimg){
+
+	cannytrainframe++;
+
+	if (CANNY_CV == true)
+	{
+		cvCvtColor(cannyimg, cannyframe, CV_BGR2GRAY);
+		cvCanny(cannyframe, cannyframe, 50, 150, 3);
+	}
+	else
+	{
+		// input rgb image.
+		customcanny(cannyimg, cannyframe, 5);
+		cannyframe = cvLoadImage("temp.jpg", 0); //0 : get gray image
+	}
+
+	// canny train
+	if (cannytrainframe < cannydenominator - 1)
+	{
+		cvAnd(cannybackground, cannyframe, cannybackground);
+
+		for (int x = 0; x < cannybackground->height; x++)
+		{
+			for (int y = 0; y < cannybackground->width; y++)
+			{
+				int i = x * cannyframe->widthStep + y;
+				int cannypixel = x * cannyframe->width + y;
+
+				CvScalar xt = cvScalar(
+					(unsigned char)cannyframe->imageData[i + 0],
+					(unsigned char)cannyframe->imageData[i + 1],
+					(unsigned char)cannyframe->imageData[i + 2],
+					0);
+
+				if (xt.val[0] == 0)
+				{
+					canny canny;
+					canny.cannyvalue = 0;
+					canny_model[cannypixel].push_back(canny);
+				}
+				else
+				{
+					canny canny;
+					canny.cannyvalue = 1;
+					canny_model[cannypixel].push_back(canny);
+				}
+			}
+		}
+	}
+	// canny detect
+	else
+	{
+		for (int x = 0; x < cannybackground->height; x++)
+		{
+			for (int y = 0; y < cannybackground->width; y++)
+			{
+				// add one in the end.
+				int i = x * cannybackground->widthStep + y;
+				int cannypixel = x * cannyframe->width + y;
+				CvScalar xt = cvScalar(
+					(unsigned char)cannyframe->imageData[i + 0],
+					(unsigned char)cannyframe->imageData[i + 1],
+					(unsigned char)cannyframe->imageData[i + 2],
+					0);
+				if (xt.val[0] == 0)
+				{
+					canny canny;
+					canny.cannyvalue = 0;
+					canny_model[cannypixel].push_back(canny);
+				}
+				else
+				{
+					canny canny;
+					canny.cannyvalue = 1;
+					canny_model[cannypixel].push_back(canny);
+				}
+
+				// calculate the canny background image.
+				int sum = 0;
+				vector<canny>::iterator iter;
+				for (iter = canny_model[cannypixel].begin(); iter != canny_model[cannypixel].end(); iter++)
+				{
+					sum = sum + iter->cannyvalue;
+				}
+				if (sum < cannynumerator)
+				{
+					cannybackground->imageData[i + 0] = 0;
+				}
+				else
+				{
+					cannybackground->imageData[i + 0] = 255;
+				}
+
+				// delete one in the first
+				canny_model[cannypixel].erase(canny_model[cannypixel].begin());
+
+			}
+		}
+	}
+	// canny foreground image = canny result - canny background image
+	cvSub(cannyframe, cannybackground, cannyforeground);
+
+}
+
+/* Update bg_model */
+// output : result image
+void vibook::update_bg_model(IplImage *img, IplImage *canny_foreground, IplImage *result){
+
+	// for each pixel
+	for (int x = 0; x < img->height; x++)
+	{
+		for (int y = 0; y < img->width; y++)
+		{
+			int i = (x * img->widthStep) + (3 * y);				// RGB image
+			int canny_i = (x * canny_foreground->widthStep) + y;	// gray image
+
+			int pixel = (((x + 1) * ((img->width) + 2))) + y + 1;	// WHY ??????
+			int imagepixel = (x * img->width) + y;
+
+			// get image data
+			CvScalar xt = cvScalar((unsigned char)img->imageData[i + 2],
+				(unsigned char)img->imageData[i + 1],
+				(unsigned char)img->imageData[i + 0], 0);
+
+			CvScalar cannyxt = cvScalar((unsigned char)canny_foreground->imageData[canny_i + 0],
+				(unsigned char)canny_foreground->imageData[canny_i + 1],
+				(unsigned char)canny_foreground->imageData[canny_i + 2], 0);
+
+			double vec_i = sqrt(xt.val[0] * xt.val[0] + xt.val[1] * xt.val[1] + xt.val[2] * xt.val[2]);
+
+			// find the matched codeword from bg_model
+			double delta = 0;
+			vector<viword>::iterator iter;
+			for (iter = bg_model[pixel].begin(); iter != bg_model[pixel].end(); iter++)
+			{
+				delta = colordis(xt, iter->vm);
+				if (delta <= param.epsilon2 && brightness(vec_i, iter->aux.i_min, iter->aux.i_max))
+				{
+					break;
+				}
+			}
+
+			// if background model's codebook is null or there is no match
+			if (iter == bg_model[pixel].end())
+			{
+				result->imageData[imagepixel] = 255;	// is not background means white color in result image.
+			}
+			// otherwise,update the matched background model's codeword
+			else
+			{
+				// iter is the matched codeword.
+
+				// update color vector ( paper formula 3 )
+				iter->vm = cvScalar(((xt.val[0] + (iter->aux.f * iter->vm.val[0])) / (iter->aux.f + 1)),
+					((xt.val[1] + (iter->aux.f * iter->vm.val[1])) / (iter->aux.f + 1)),
+					((xt.val[2] + (iter->aux.f * iter->vm.val[2])) / (iter->aux.f + 1)),
+					0);
+				// update aux ( paper formula 3 )
+				iter->aux.i_min = min(vec_i, iter->aux.i_min);					// min brightness
+				iter->aux.i_max = max(vec_i, iter->aux.i_max);					// max brightness
+				iter->aux.f = iter->aux.f + 1;									// frequency
+				iter->aux.lamda = max(iter->aux.lamda, frame_num - iter->aux.q);	// longest time interval
+				iter->aux.p = iter->aux.p;										// first access time
+				iter->aux.q = frame_num;										// last access time
+
+				// is background means black color in result image.
+				result->imageData[imagepixel] = 0;
+
+				// Update codebook
+				if (cannyxt.val[0] == 0)			// for foreground forbidden update [ use canny foreground image ]
+				{
+					if (rndn[rdx] == 0)			// for frequency control
+					{
+						switch (rnd8[rdx])
+						{
+						case 0:
+						{
+							if ((x > 0) && (y > 0))
+							{
+								int temp_i = ((x - 1) * img->widthStep) + (3 * (y - 1));
+
+								CvScalar temcs = cvScalar((unsigned char)img->imageData[i + 2],
+									(unsigned char)img->imageData[i + 1],
+									(unsigned char)img->imageData[i + 0], 0);
+
+								double temvec_i = sqrt(temcs.val[0] * temcs.val[0] + temcs.val[1] * temcs.val[1] + temcs.val[2] * temcs.val[2]);
+
+								updatefromneighbor(bg_model, img, canny_foreground, temcs, temvec_i, x, y, x - 1, y - 1);
+							}
+						}
+							break;
+
+						case 1:
+						{
+							if (x > 0)
+							{
+								int temp_i = ((x - 1) * img->widthStep) + (3 * y);
+
+								CvScalar temcs = cvScalar((unsigned char)img->imageData[i + 2],
+									(unsigned char)img->imageData[i + 1],
+									(unsigned char)img->imageData[i + 0], 0);
+
+								double temvec_i = sqrt(temcs.val[0] * temcs.val[0] + temcs.val[1] * temcs.val[1] + temcs.val[2] * temcs.val[2]);
+
+								updatefromneighbor(bg_model, img, canny_foreground, temcs, temvec_i, x, y, x - 1, y);
+							}
+						}
+							break;
+
+						case 2:
+						{
+							if ((x > 0) && (y < ((canny_foreground->width) - 1)))
+							{
+								int temp_i = ((x - 1) * img->widthStep) + (3 * (y + 1));
+
+								CvScalar temcs = cvScalar((unsigned char)img->imageData[i + 2],
+									(unsigned char)img->imageData[i + 1],
+									(unsigned char)img->imageData[i + 0], 0);
+
+								double temvec_i = sqrt(temcs.val[0] * temcs.val[0] + temcs.val[1] * temcs.val[1] + temcs.val[2] * temcs.val[2]);
+
+								updatefromneighbor(bg_model, img, canny_foreground, temcs, temvec_i, x, y, x - 1, y + 1);
+							}
+						}
+							break;
+
+						case 3:
+						{
+							if (y < ((canny_foreground->width) - 1))
+							{
+								int temp_i = (x * img->widthStep) + (3 * (y + 1));
+
+								CvScalar temcs = cvScalar((unsigned char)img->imageData[i + 2],
+									(unsigned char)img->imageData[i + 1],
+									(unsigned char)img->imageData[i + 0], 0);
+
+								double temvec_i = sqrt(temcs.val[0] * temcs.val[0] + temcs.val[1] * temcs.val[1] + temcs.val[2] * temcs.val[2]);
+
+								updatefromneighbor(bg_model, img, canny_foreground, temcs, temvec_i, x, y, x, y + 1);
+							}
+						}
+							break;
+
+						case 4:
+						{
+							if ((x < ((canny_foreground->height) - 1)) && (y < ((canny_foreground->width) - 1)))
+							{
+								int temp_i = ((x + 1) * img->widthStep) + (3 * (y + 1));
+
+								CvScalar temcs = cvScalar((unsigned char)img->imageData[i + 2],
+									(unsigned char)img->imageData[i + 1],
+									(unsigned char)img->imageData[i + 0], 0);
+
+								double temvec_i = sqrt(temcs.val[0] * temcs.val[0] + temcs.val[1] * temcs.val[1] + temcs.val[2] * temcs.val[2]);
+
+								updatefromneighbor(bg_model, img, canny_foreground, temcs, temvec_i, x, y, x + 1, y + 1);
+							}
+						}
+							break;
+
+						case 5:
+						{
+							if (x < ((canny_foreground->height) - 1))
+							{
+								int temp_i = ((x + 1) * img->widthStep) + (3 * y);
+
+								CvScalar temcs = cvScalar((unsigned char)img->imageData[i + 2],
+									(unsigned char)img->imageData[i + 1],
+									(unsigned char)img->imageData[i + 0], 0);
+
+								double temvec_i = sqrt(temcs.val[0] * temcs.val[0] + temcs.val[1] * temcs.val[1] + temcs.val[2] * temcs.val[2]);
+
+								updatefromneighbor(bg_model, img, canny_foreground, temcs, temvec_i, x, y, x + 1, y);
+							}
+						}
+							break;
+
+						case 6:
+						{
+							if ((x < ((canny_foreground->height) - 1)) && (y > 0))
+							{
+								int temp_i = ((x + 1) * img->widthStep) + (3 * (y - 1));
+
+								CvScalar temcs = cvScalar((unsigned char)img->imageData[i + 2],
+									(unsigned char)img->imageData[i + 1],
+									(unsigned char)img->imageData[i + 0], 0);
+
+								double temvec_i = sqrt(temcs.val[0] * temcs.val[0] + temcs.val[1] * temcs.val[1] + temcs.val[2] * temcs.val[2]);
+
+								updatefromneighbor(bg_model, img, canny_foreground, temcs, temvec_i, x, y, x + 1, y - 1);
+							}
+						}
+							break;
+
+						case 7:
+						{
+							if (y > 0)
+							{
+								int temp_i = (x * img->widthStep) + (3 * (y - 1));
+
+								CvScalar temcs = cvScalar((unsigned char)img->imageData[i + 2],
+									(unsigned char)img->imageData[i + 1],
+									(unsigned char)img->imageData[i + 0], 0);
+
+								double temvec_i = sqrt(temcs.val[0] * temcs.val[0] + temcs.val[1] * temcs.val[1] + temcs.val[2] * temcs.val[2]);
+
+								updatefromneighbor(bg_model, img, canny_foreground, temcs, temvec_i, x, y, x, y - 1);
+							}
+						}
+							break;
+						}
+
+						rdx++;
+
+						// ------ 4. updatetoneighbor
+
+						switch (rnd8[rdx])
+						{
+						case 0:
+						{
+							if ((x > 0) && (y > 0))
+							{
+								updatetoneighbor(bg_model, img, canny_foreground, xt, vec_i, x - 1, y - 1);
+							}
+						}
+							break;
+
+						case 1:
+						{
+							if (x > 0)
+							{
+								updatetoneighbor(bg_model, img, canny_foreground, xt, vec_i, x - 1, y);
+							}
+						}
+							break;
+
+						case 2:
+						{
+							if ((x > 0) && (y < ((canny_foreground->width) - 1)))
+							{
+								updatetoneighbor(bg_model, img, canny_foreground, xt, vec_i, x - 1, y + 1);
+							}
+						}
+							break;
+
+						case 3:
+						{
+							if (y < ((canny_foreground->width) - 1))
+							{
+								updatetoneighbor(bg_model, img, canny_foreground, xt, vec_i, x, y + 1);
+							}
+						}
+							break;
+
+						case 4:
+						{
+							if ((x < ((canny_foreground->height) - 1)) && (y < ((canny_foreground->width) - 1)))
+							{
+								updatetoneighbor(bg_model, img, canny_foreground, xt, vec_i, x + 1, y + 1);
+							}
+						}
+							break;
+
+						case 5:
+						{
+							if (x < ((canny_foreground->height) - 1))
+							{
+								updatetoneighbor(bg_model, img, canny_foreground, xt, vec_i, x + 1, y);
+							}
+						}
+							break;
+
+						case 6:
+						{
+							if ((x < ((canny_foreground->height) - 1)) && (y > 0))
+							{
+								updatetoneighbor(bg_model, img, canny_foreground, xt, vec_i, x + 1, y - 1);
+							}
+						}
+							break;
+
+						case 7:
+						{
+							if (y > 0)
+							{
+								updatetoneighbor(bg_model, img, canny_foreground, xt, vec_i, x, y - 1);
+							}
+						}
+							break;
+						}
+					}
+				}
+			}
+			rdx = ((rdx + 1) % rndSize);
+		}
+	}
+
+	// make sure the codeword in same pixel position not too much.
+	largecontrol(img);
+
+}
+
+// ------ public to detect background ------
+void vibook::UpdateBackground( IplImage *img ,IplImage *cannyimg )
+{	
+	frame_num++;
+	
+	// get canny foreground image.
+	update_canny_model(cannyimg);
+
+	// calculate cannycodebookResult and codebookresult
+#ifdef RECORD_CODEBOOK_RESULT
+	IplImage *zeroImage = cvCreateImage(cvSize(cannyimg->width, cannyimg->height), 8, 1);
+	cvZero(zeroImage);
+
+	cvShowImage("zeroImage", zeroImage);
+
+	update_bg_model(img, zeroImage, codebookResult);
+#endif // RECORD_CODEBOOK_RESULT
+#ifdef RECORD_CODEBOOK_CANNY_RESULT
+
+	cvShowImage("cannyforeground", cannyforeground);
+
+	update_bg_model(img, cannyforeground, cannycodebookResult);
+#endif // RECORD_CODEBOOK_CANNY_RESULT
+
+
+#ifdef RECORD_CODEBOOK_RESULT
+	cvShowImage("codebookResult", codebookResult);
+#endif // RECORD_CODEBOOK_RESULT
+
+#ifdef RECORD_CODEBOOK_CANNY_RESULT
+	cvShowImage("cannycodebookResult", cannycodebookResult);
+#endif // RECORD_CODEBOOK_CANNY_RESULT
+
+	cvWaitKey(10);
+}
+
+// clear bg_model and canny_model
+void vibook::modelclear()
+{
+	bg_model.clear();
+	vector<vector< viword >>().swap(bg_model);
+
+	canny_model.clear();
+	vector<vector< canny >>().swap(canny_model);
+}
+
+// make sure the codeword in same pixel position not too much.
+void vibook::largecontrol(IplImage *img)
+{
+	for( int i = 0; i < bg_model.size(); i++ ) 
+	{
+		for( vector< struct viword >::iterator iter = bg_model[i].begin(); iter != bg_model[i].end(); ) 
+		{
+			if( frame_num - iter->aux.q > param.t_delete )
+			{
+				vector<viword>::iterator temp;
+				temp = bg_model[i].erase( iter );
+				iter = temp;
+			}
+			else
+			{
+				iter++;
+			}
+		}
+		
+		// if the pixel's codeword is empty in bg_model.
+		// must not the edge because edge is not store any data.
+		if((bg_model[i].size()==0) && !(((i/backgroundwidth)==0) || ((i/backgroundwidth)==(backgroundheight-1)) || ((i%backgroundwidth)==0) || ((i%backgroundwidth)==(backgroundwidth-1))))
+		{
+			// recreate bg_model
+			createpixelbackground(img,i);
+		}
+	}
+}
+
+// recreate single codeword
+// input : image, bg_model pos.
+void vibook::createpixelbackground( IplImage *img, int bg )
+{
+	int x = ((bg / backgroundwidth) - 1);
+	int y = ((bg % backgroundwidth) - 1);
+
+	if((x!=0) && (x!=((img->height)-1)) && (y!=0) && (y!=((img->width)-1)))
+	{
+		pushviword(bg_model,img,bg,x,y);
+		pushviword(bg_model,img,bg,x-1,y-1);
+		pushviword(bg_model,img,bg,x-1,y);
+		pushviword(bg_model,img,bg,x-1,y+1);
+		pushviword(bg_model,img,bg,x,y+1);
+		pushviword(bg_model,img,bg,x+1,y+1);
+		pushviword(bg_model,img,bg,x+1,y);
+		pushviword(bg_model,img,bg,x+1,y-1);
+		pushviword(bg_model,img,bg,x,y-1);
+	}
+	else
+	{
+		if(x==0)
+		{
+			if((y!=0) && (y!=img->width-1))
+			{
+				pushviword(bg_model,img,bg,x,y);
+				pushviword(bg_model,img,bg,x,y+1);
+				pushviword(bg_model,img,bg,x+1,y+1);
+				pushviword(bg_model,img,bg,x+1,y);
+				pushviword(bg_model,img,bg,x+1,y-1);
+				pushviword(bg_model,img,bg,x,y-1);
+			}
+			else
+			{
+				if(y==0)
+				{
+					pushviword(bg_model,img,bg,x,y);
+					pushviword(bg_model,img,bg,x,y+1);
+					pushviword(bg_model,img,bg,x+1,y+1);
+					pushviword(bg_model,img,bg,x+1,y);
+				}
+				else
+				{
+					pushviword(bg_model,img,bg,x,y);
+					pushviword(bg_model,img,bg,x+1,y);
+					pushviword(bg_model,img,bg,x+1,y-1);
+					pushviword(bg_model,img,bg,x,y-1);
+				}
+			}
+		}
+		else
+		{
+			if(x==((img->height)-1))
+			{
+				if((y!=0) && (y!=img->width-1))
+				{
+					pushviword(bg_model,img,bg,x,y);
+					pushviword(bg_model,img,bg,x,y-1);
+					pushviword(bg_model,img,bg,x-1,y-1);
+					pushviword(bg_model,img,bg,x-1,y);
+					pushviword(bg_model,img,bg,x-1,y+1);
+					pushviword(bg_model,img,bg,x,y+1);
+				}
+				else
+				{
+					if(y==0)
+					{
+						pushviword(bg_model,img,bg,x,y);
+						pushviword(bg_model,img,bg,x-1,y);
+						pushviword(bg_model,img,bg,x-1,y+1);
+						pushviword(bg_model,img,bg,x,y+1);
+					}
+					else
+					{
+						pushviword(bg_model,img,bg,x,y);
+						pushviword(bg_model,img,bg,x,y-1);
+						pushviword(bg_model,img,bg,x-1,y-1);
+						pushviword(bg_model,img,bg,x-1,y);
+					}
+				}
+			}
+			else
+			{
+				if(y==0)
+				{
+					pushviword(bg_model,img,bg,x,y);
+					pushviword(bg_model,img,bg,x-1,y);
+					pushviword(bg_model,img,bg,x-1,y+1);
+					pushviword(bg_model,img,bg,x,y+1);
+					pushviword(bg_model,img,bg,x+1,y+1);
+					pushviword(bg_model,img,bg,x+1,y);
+				}
+				else
+				{
+					pushviword(bg_model,img,bg,x,y);
+					pushviword(bg_model,img,bg,x+1,y);
+					pushviword(bg_model,img,bg,x+1,y-1);
+					pushviword(bg_model,img,bg,x,y-1);
+					pushviword(bg_model,img,bg,x-1,y-1);
+					pushviword(bg_model,img,bg,x-1,y);
+				}
+			}
+		}
+	}
+}
+
+// update neighbor by myself
+void vibook::updatetoneighbor(vector < vector< viword > > &bg_model,IplImage *img, IplImage *canny_foreground, CvScalar &xt, double vec_i, int x, int y)
+{
+	int tem_pixel = (((x + 1) * ((img->width) + 2))) + y + 1;	// to neighbor ??????????????
+	int tem_i = (x * canny_foreground->widthStep) + y;			// from myself
+							
+	CvScalar cannyneightorxt = cvScalar( (unsigned char)canny_foreground->imageData[tem_i+0], 
+										 (unsigned char)canny_foreground->imageData[tem_i+1], 
+										 (unsigned char)canny_foreground->imageData[tem_i+2],
+										 0 );
+	if(cannyneightorxt.val[0] == 0)
+	{
+		// find the match
+		double tem_delta = 0;
+		vector<viword>::iterator iter;
+		for( iter = bg_model[tem_pixel].begin(); iter != bg_model[tem_pixel].end(); iter++ )
+		{
+			tem_delta = colordis( xt, iter->vm);
+			if( tem_delta <= param.epsilon3 && brightness( vec_i, iter->aux.i_min, iter->aux.i_max ) )
+				break;
+		}
+
+		// not match -> create
+		if( iter == bg_model[tem_pixel].end() )
+		{
+			viword viword;
+			viword.vm			= cvScalar( xt.val[0], xt.val[1], xt.val[2],0 );
+			viword.aux.i_min	= vec_i;
+			viword.aux.i_max	= vec_i;
+			viword.aux.f		= 1;
+			viword.aux.lamda	= frame_num-1;
+			viword.aux.p		= frame_num;
+			viword.aux.q		= frame_num;
+			bg_model[tem_pixel].push_back( viword );
+		}
+		// match -> update				
+		else
+		{
+			iter->vm			= cvScalar( ((xt.val[0] + (iter->aux.f * iter->vm.val[0]))/(iter->aux.f + 1)),
+											((xt.val[1] + (iter->aux.f * iter->vm.val[1]))/(iter->aux.f + 1)),
+											((xt.val[2] + (iter->aux.f * iter->vm.val[2]))/(iter->aux.f + 1)),
+											0 );
+			iter->aux.i_min		= min( vec_i, iter->aux.i_min );
+			iter->aux.i_max		= max( vec_i, iter->aux.i_max );
+			iter->aux.f			= iter->aux.f + 1;
+			iter->aux.lamda		= max( iter->aux.lamda, frame_num-iter->aux.q );
+			iter->aux.p			= iter->aux.p;
+			iter->aux.q			= frame_num;
+		}
+	}
+}
+
+// update myself from neighbor
+void vibook::updatefromneighbor(vector < vector< viword > > &bg_model,IplImage *img, IplImage *canny_foreground, CvScalar &xt, double vec_i, int x, int y, int pixelx, int pixely)
+{
+	int tem_pixel = (((x + 1) * ((img->width) + 2))) + y + 1;		// to myself
+	int tem_i = (pixelx * canny_foreground->widthStep) + pixely;		// from neighbor
+							
+	CvScalar cannyneightorxt = cvScalar( (unsigned char)canny_foreground->imageData[tem_i+0], 
+										 (unsigned char)canny_foreground->imageData[tem_i+1], 
+										 (unsigned char)canny_foreground->imageData[tem_i+2],
+										 0 );
+	if(cannyneightorxt.val[0] == 0) // not the foreground -> update
+	{
+		// find the match
+		double tem_delta = 0;
+		vector<viword>::iterator iter;
+		for( iter = bg_model[tem_pixel].begin(); iter != bg_model[tem_pixel].end(); iter++ )
+		{
+			tem_delta = colordis( xt, iter->vm);
+			if( tem_delta <= param.epsilon3 && brightness( vec_i, iter->aux.i_min, iter->aux.i_max ) )
+				break;
+		}
+
+		// not match -> create
+		if( iter == bg_model[tem_pixel].end() )
+		{
+			viword viword;
+			viword.vm			= cvScalar(xt.val[0], xt.val[1], xt.val[2], 0);
+			viword.aux.i_min	= vec_i;
+			viword.aux.i_max	= vec_i;
+			viword.aux.f		= 1;
+			viword.aux.lamda	= frame_num-1;
+			viword.aux.p		= frame_num;
+			viword.aux.q		= frame_num;
+			bg_model[tem_pixel].push_back( viword );
+		}
+		// match -> update
+		else
+		{
+			iter->vm			= cvScalar( ((xt.val[0] + (iter->aux.f * iter->vm.val[0]))/(iter->aux.f + 1)),
+											((xt.val[1] + (iter->aux.f * iter->vm.val[1]))/(iter->aux.f + 1)),
+											((xt.val[2] + (iter->aux.f * iter->vm.val[2]))/(iter->aux.f + 1)),
+											0 );
+			iter->aux.i_min		= min( vec_i, iter->aux.i_min );
+			iter->aux.i_max		= max( vec_i, iter->aux.i_max );
+			iter->aux.f			= iter->aux.f + 1;
+			iter->aux.lamda		= max( iter->aux.lamda, frame_num-iter->aux.q );
+			iter->aux.p			= iter->aux.p;
+			iter->aux.q			= frame_num;
+		}
+	}
+}
+

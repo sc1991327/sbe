@@ -1,0 +1,12 @@
+原本的updateneighbor的function改為updatetoneighbor代表是傳給鄰居也就是原本就有的
+加上新的function  updatefromneighbor
+
+在detect的function裡面
+先判斷現在的pixel是不是在邊上
+如果在邊上就不會再做下面的事
+如果不在邊上
+就會先選要從哪個鄰居更新過來
+然後這時候會把鄰居的顏色跟亮度取出來之後傳到updatefromneighbor裡面
+在這個function裡面先判斷鄰居是不是在邊上
+再去做更新的動作
+更新的機制跟其他的一樣就沒更改了
